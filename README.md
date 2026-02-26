@@ -65,3 +65,13 @@ dotnet publish .\src\SilhouetteLocalDaily\SilhouetteLocalDaily.csproj `
 ```
 
 - この環境での実行可否と結果は `BUILD_IN_ENVIRONMENT.md` を参照してください。
+
+
+## 8. dotnet インストール（Ubuntu）
+このリポジトリには Ubuntu 向けのインストール補助スクリプトを同梱しています。
+
+```bash
+./scripts/install-dotnet-ubuntu.sh
+```
+
+> このコンテナ環境ではネットワーク制約により実行に失敗する場合があります（詳細は `BUILD_IN_ENVIRONMENT.md`）。
