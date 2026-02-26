@@ -55,3 +55,13 @@ dotnet publish .\src\SilhouetteLocalDaily\SilhouetteLocalDaily.csproj `
 - 単一ウィンドウUI
 
 > 注意: メモ保存、履歴、画像添付などは未実装です（要件定義は `要件定義_WinUI3.md` を参照）。
+
+
+## 7. Exe化補助スクリプト
+- Windows PowerShell で以下を実行すると、self-contained の Exe を発行できます。
+
+```powershell
+.\scripts\publish-exe.ps1
+```
+
+- この環境での実行可否と結果は `BUILD_IN_ENVIRONMENT.md` を参照してください。
