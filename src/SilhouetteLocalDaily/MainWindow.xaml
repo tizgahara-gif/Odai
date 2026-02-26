@@ -1,0 +1,35 @@
+<Window
+    x:Class="SilhouetteLocalDaily.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:local="using:SilhouetteLocalDaily"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    Title="Silhouette Local Daily">
+
+    <Grid Padding="24" RowDefinitions="Auto,Auto,Auto,*" RowSpacing="12">
+        <TextBlock Text="シルエット × 局所ルール（最小構成）"
+                   FontSize="24"
+                   FontWeight="SemiBold" />
+
+        <TextBlock x:Name="TodayTextBlock"
+                   Grid.Row="1"
+                   FontSize="16" />
+
+        <Border Grid.Row="2"
+                Padding="12"
+                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                CornerRadius="8">
+            <StackPanel>
+                <TextBlock x:Name="SilhouetteTextBlock" FontSize="18" />
+                <TextBlock x:Name="LocalRuleTextBlock" FontSize="18" />
+            </StackPanel>
+        </Border>
+
+        <StackPanel Grid.Row="3" Orientation="Horizontal" Spacing="8">
+            <Button Content="Generate" Click="OnGenerateClicked" />
+            <TextBlock VerticalAlignment="Center" Text="※ Exe起動確認用の最小UI" />
+        </StackPanel>
+    </Grid>
+</Window>
