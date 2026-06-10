@@ -46,14 +46,21 @@ MIN_FALL_INTERVAL = 0.08
 DROP_INPUT_LOCK_SECONDS = 0.5
 SPAWN_X = BOARD_WIDTH // 2 - 2
 LINE_CLEAR_BASE_SCORES = {0: 0, 1: 100, 2: 300, 3: 500, 4: 800}
-RANDOM_MINO_START_LEVEL = 30
-RANDOM_MINO_BASE_CHANCE = 0.20
-RANDOM_MINO_CHANCE_PER_LEVEL = 0.02
-RANDOM_MINO_MAX_CHANCE = 0.50
 RANDOM_MINO_GRID_SIZE = 4
-RANDOM_MINO_CELL_COUNT_WEIGHTS = {4: 80, 5: 20}
-RANDOM_MINO_COLOR_4 = (1.0, 0.55, 0.15, 1.0)
-RANDOM_MINO_COLOR_5 = (1.0, 0.25, 0.15, 1.0)
+RANDOM_MINO_MIN_CELL_COUNT = 5
+RANDOM_MINO_MAX_CELL_COUNT = 8
+RANDOM_MINO_LEVEL_RULES = (
+    (5, 5, 0.10),
+    (10, 6, 0.05),
+    (15, 7, 0.03),
+    (20, 8, 0.01),
+)
+RANDOM_MINO_COLORS = {
+    5: (1.0, 0.55, 0.15, 1.0),
+    6: (1.0, 0.35, 0.15, 1.0),
+    7: (1.0, 0.15, 0.15, 1.0),
+    8: (0.75, 0.10, 1.0, 1.0),
+}
 
 PIECE_KINDS = ("I", "O", "T", "S", "Z", "J", "L")
 PIECE_COLORS = {
@@ -465,10 +472,16 @@ def make_bag():
     return bag
 
 
-def choose_random_mino_cell_count():
-    counts = list(RANDOM_MINO_CELL_COUNT_WEIGHTS.keys())
-    weights = list(RANDOM_MINO_CELL_COUNT_WEIGHTS.values())
-    return random.choices(counts, weights=weights, k=1)[0]
+def choose_random_mino_cell_count_for_level(level):
+    roll = random.random()
+    cumulative = 0.0
+    for required_level, cell_count, chance in RANDOM_MINO_LEVEL_RULES:
+        if level < required_level:
+            continue
+        cumulative += chance
+        if roll < cumulative:
+            return cell_count
+    return None
 
 
 def normalize_mino_cells(cells):
@@ -497,18 +510,28 @@ def is_orthogonally_connected(cells):
 def is_valid_random_mino_cells(cells, grid_size=RANDOM_MINO_GRID_SIZE):
     if not cells or len(set(cells)) != len(cells):
         return False
+    if len(cells) < RANDOM_MINO_MIN_CELL_COUNT or len(cells) > RANDOM_MINO_MAX_CELL_COUNT:
+        return False
     for x, y in cells:
         if x < 0 or y < 0 or x >= grid_size or y >= grid_size:
             return False
     return is_orthogonally_connected(cells)
 
 
-def generate_random_mino_cells(cell_count=None, grid_size=RANDOM_MINO_GRID_SIZE):
-    if cell_count is None:
-        cell_count = choose_random_mino_cell_count()
-    cell_count = max(1, min(int(cell_count), grid_size * grid_size))
+def get_random_mino_fallback_cells(cell_count):
+    fallback_shapes = {
+        5: [(0, 0), (1, 0), (2, 0), (1, 1), (1, 2)],
+        6: [(0, 0), (1, 0), (2, 0), (0, 1), (1, 1), (2, 1)],
+        7: [(0, 0), (1, 0), (2, 0), (3, 0), (1, 1), (1, 2), (2, 2)],
+        8: [(0, 0), (1, 0), (2, 0), (3, 0), (0, 1), (1, 1), (2, 1), (3, 1)],
+    }
+    return normalize_mino_cells(fallback_shapes.get(cell_count, fallback_shapes[5]))
 
-    for _attempt in range(300):
+
+def generate_random_mino_cells(cell_count, grid_size=RANDOM_MINO_GRID_SIZE):
+    cell_count = max(RANDOM_MINO_MIN_CELL_COUNT, min(int(cell_count), RANDOM_MINO_MAX_CELL_COUNT))
+
+    for _attempt in range(500):
         cells = {(random.randrange(grid_size), random.randrange(grid_size))}
         while len(cells) < cell_count:
             bx, by = random.choice(tuple(cells))
@@ -526,13 +549,11 @@ def generate_random_mino_cells(cell_count=None, grid_size=RANDOM_MINO_GRID_SIZE)
             if not candidates:
                 break
             cells.add(random.choice(candidates))
-        result = list(cells)
+        result = normalize_mino_cells(list(cells))
         if len(result) == cell_count and is_valid_random_mino_cells(result, grid_size):
-            return normalize_mino_cells(result)
+            return result
 
-    if cell_count >= 5:
-        return [(0, 0), (1, 0), (2, 0), (1, 1), (1, 2)]
-    return [(0, 0), (1, 0), (0, 1), (1, 1)]
+    return get_random_mino_fallback_cells(cell_count)
 
 
 def rotate_custom_cells(cells, rotation):
@@ -543,27 +564,25 @@ def rotate_custom_cells(cells, rotation):
     return result
 
 
-def should_spawn_random_mino(game):
-    if game.level < RANDOM_MINO_START_LEVEL:
-        return False
-    chance = min(
-        RANDOM_MINO_MAX_CHANCE,
-        RANDOM_MINO_BASE_CHANCE + (game.level - RANDOM_MINO_START_LEVEL) * RANDOM_MINO_CHANCE_PER_LEVEL,
-    )
-    return random.random() < chance
+def get_random_mino_color(cell_count):
+    return RANDOM_MINO_COLORS.get(cell_count, RANDOM_MINO_COLORS[RANDOM_MINO_MIN_CELL_COUNT])
 
 
-def make_random_next_piece_data():
-    cell_count = choose_random_mino_cell_count()
+def make_random_next_piece_data(cell_count):
+    cell_count = max(RANDOM_MINO_MIN_CELL_COUNT, min(int(cell_count), RANDOM_MINO_MAX_CELL_COUNT))
     cells = generate_random_mino_cells(cell_count=cell_count)
-    cell_count = len(cells)
-    color = RANDOM_MINO_COLOR_5 if cell_count >= 5 else RANDOM_MINO_COLOR_4
-    return NextPieceData(kind="RANDOM", custom_cells=cells, color=color, cell_count=cell_count)
+    return NextPieceData(
+        kind="RANDOM",
+        custom_cells=cells,
+        color=get_random_mino_color(cell_count),
+        cell_count=cell_count,
+    )
 
 
 def make_next_piece_data(rt):
-    if should_spawn_random_mino(rt.game):
-        return make_random_next_piece_data()
+    cell_count = choose_random_mino_cell_count_for_level(rt.game.level)
+    if cell_count is not None:
+        return make_random_next_piece_data(cell_count)
     return NextPieceData(kind=draw_from_bag(rt), cell_count=4)
 
 
@@ -862,7 +881,7 @@ def get_piece_color(piece_or_kind):
     if isinstance(piece_or_kind, NextPieceData) and piece_or_kind.color is not None:
         return piece_or_kind.color
     kind = getattr(piece_or_kind, "kind", piece_or_kind)
-    return PIECE_COLORS.get(kind, RANDOM_MINO_COLOR_4 if kind == "RANDOM" else (1.0, 1.0, 1.0, 1.0))
+    return PIECE_COLORS.get(kind, get_random_mino_color(RANDOM_MINO_MIN_CELL_COUNT) if kind == "RANDOM" else (1.0, 1.0, 1.0, 1.0))
 
 
 def apply_piece_color(obj, piece_or_kind):
