@@ -176,8 +176,8 @@ def start_bgm(rt, context):
         if getattr(prefs, "bgm_loop", True):
             try:
                 factory = factory.loop(-1)
-            except Exception:
-                pass
+            except Exception as exc:
+                print(f"[Tetris Mode] BGM loop unavailable, playing once: {exc}")
         device = aud.Device()
         handle = device.play(factory)
         try:
@@ -188,6 +188,7 @@ def start_bgm(rt, context):
         rt.bgm_factory = factory
         rt.bgm_handle = handle
         rt.bgm_filepath = filepath
+        print(f"[Tetris Mode] BGM started: {filepath}")
     except Exception as exc:
         print(f"[Tetris Mode] Failed to play BGM: {exc}")
         rt.bgm_device = None
