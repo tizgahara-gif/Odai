@@ -11,6 +11,7 @@ bl_info = {
     "category": "Object",
 }
 
+import os
 import random
 import time
 from dataclasses import dataclass, field
@@ -132,6 +133,10 @@ class TetrisRuntimeState:
     active_object_name: str | None = None
     source_object_name: str | None = None
     source_object_hidden: bool | None = None
+    bgm_device: object | None = None
+    bgm_factory: object | None = None
+    bgm_handle: object | None = None
+    bgm_filepath: str | None = None
     cleaned: bool = False
 
 
@@ -145,6 +150,62 @@ def get_runtime():
 def is_tetris_running():
     rt = get_runtime()
     return rt is not None and not rt.cleaned
+
+
+def get_addon_preferences(context):
+    addon = context.preferences.addons.get(__name__)
+    if addon is None:
+        return None
+    return addon.preferences
+
+
+def start_bgm(rt, context):
+    prefs = get_addon_preferences(context)
+    if prefs is None or not getattr(prefs, "bgm_enabled", True):
+        return
+    filepath = bpy.path.abspath(getattr(prefs, "bgm_filepath", ""))
+    if not filepath:
+        return
+    if not os.path.isfile(filepath):
+        print(f"[Tetris Mode] BGM file not found: {filepath}")
+        return
+    try:
+        import aud
+        factory = aud.Factory.file(filepath)
+        if getattr(prefs, "bgm_loop", True):
+            try:
+                factory = factory.loop(-1)
+            except Exception:
+                pass
+        device = aud.Device()
+        handle = device.play(factory)
+        try:
+            handle.volume = float(getattr(prefs, "bgm_volume", 0.35))
+        except Exception:
+            pass
+        rt.bgm_device = device
+        rt.bgm_factory = factory
+        rt.bgm_handle = handle
+        rt.bgm_filepath = filepath
+    except Exception as exc:
+        print(f"[Tetris Mode] Failed to play BGM: {exc}")
+        rt.bgm_device = None
+        rt.bgm_factory = None
+        rt.bgm_handle = None
+        rt.bgm_filepath = None
+
+
+def stop_bgm(rt):
+    handle = getattr(rt, "bgm_handle", None)
+    if handle is not None:
+        try:
+            handle.stop()
+        except Exception:
+            pass
+    rt.bgm_handle = None
+    rt.bgm_factory = None
+    rt.bgm_device = None
+    rt.bgm_filepath = None
 
 
 def make_bag():
@@ -902,6 +963,7 @@ def cleanup_runtime(context):
         except Exception:
             pass
         rt.draw_handle = None
+    stop_bgm(rt)
     restore_viewports(rt)
     restore_view_states(rt)
     restore_source_object_visibility(rt)
@@ -914,6 +976,38 @@ def cleanup_runtime(context):
     rt.game = None
     _TETRIS_RUNTIME = None
     tag_redraw_all(context)
+
+
+class TetrisModeAddonPreferences(bpy.types.AddonPreferences):
+    bl_idname = __name__
+
+    bgm_enabled: bpy.props.BoolProperty(
+        name="Enable BGM",
+        default=True,
+    )
+    bgm_filepath: bpy.props.StringProperty(
+        name="BGM File",
+        description="MP3/WAV/OGG file to play during Tetris Mode",
+        subtype="FILE_PATH",
+        default="",
+    )
+    bgm_volume: bpy.props.FloatProperty(
+        name="BGM Volume",
+        default=0.35,
+        min=0.0,
+        max=1.0,
+    )
+    bgm_loop: bpy.props.BoolProperty(
+        name="Loop BGM",
+        default=True,
+    )
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "bgm_enabled")
+        layout.prop(self, "bgm_filepath")
+        layout.prop(self, "bgm_volume")
+        layout.prop(self, "bgm_loop")
 
 
 class OBJECT_OT_tetris_mode_start(bpy.types.Operator):
@@ -962,6 +1056,7 @@ class OBJECT_OT_tetris_mode_start(bpy.types.Operator):
                 update_active_piece_objects(rt)
             rt.draw_handle = bpy.types.SpaceView3D.draw_handler_add(draw_overlay, (), "WINDOW", "POST_PIXEL")
             rt.timer = context.window_manager.event_timer_add(TIMER_INTERVAL, window=context.window)
+            start_bgm(rt, context)
             context.window_manager.modal_handler_add(self)
             tag_redraw_all(context)
             return {"RUNNING_MODAL"}
@@ -1020,6 +1115,15 @@ class VIEW3D_PT_tetris_mode_panel(bpy.types.Panel):
         row.operator(OBJECT_OT_tetris_mode_start.bl_idname, text="Start Tetris Mode", icon="PLAY")
         if running:
             layout.label(text="Already running", icon="INFO")
+        prefs = get_addon_preferences(context)
+        if prefs is not None and getattr(prefs, "bgm_enabled", True):
+            bgm_path = bpy.path.abspath(getattr(prefs, "bgm_filepath", ""))
+            if bgm_path:
+                layout.label(text=f"BGM: {os.path.basename(bgm_path)}", icon="SPEAKER")
+            else:
+                layout.label(text="BGM: Not Set", icon="SPEAKER")
+        else:
+            layout.label(text="BGM: Disabled", icon="SPEAKER")
         layout.separator()
         layout.label(text="Move: A/D or 4/6")
         layout.label(text="Rotate: Q/R or 7/9")
@@ -1028,6 +1132,7 @@ class VIEW3D_PT_tetris_mode_panel(bpy.types.Panel):
 
 
 classes = (
+    TetrisModeAddonPreferences,
     OBJECT_OT_tetris_mode_start,
     VIEW3D_PT_tetris_mode_panel,
 )
