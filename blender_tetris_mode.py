@@ -20,7 +20,7 @@ import blf
 import gpu
 from bpy_extras.view3d_utils import location_3d_to_region_2d
 from gpu_extras.batch import batch_for_shader
-from mathutils import Vector
+from mathutils import Euler, Vector
 
 
 BOARD_WIDTH = 10
@@ -120,6 +120,7 @@ class TetrisRuntimeState:
     timer: object | None = None
     draw_handle: object | None = None
     viewport_states: list = field(default_factory=list)
+    viewport_view_states: list = field(default_factory=list)
     temp_collection: object | None = None
     shared_cube_mesh: object | None = None
     active_objects: list = field(default_factory=list)
@@ -272,6 +273,77 @@ def restore_viewports(rt):
         except Exception:
             pass
     rt.viewport_states.clear()
+
+
+def iter_view3d_spaces(context):
+    windows = getattr(context.window_manager, "windows", [])
+    for window in windows:
+        screen = getattr(window, "screen", None)
+        if screen is None:
+            continue
+        for area in getattr(screen, "areas", []):
+            if area.type != "VIEW_3D":
+                continue
+            for space in area.spaces:
+                if space.type == "VIEW_3D":
+                    yield area, space
+
+
+def save_view_states(rt, context):
+    rt.viewport_view_states.clear()
+    for _area, space in iter_view3d_spaces(context):
+        rv3d = getattr(space, "region_3d", None)
+        if rv3d is None:
+            continue
+        try:
+            rt.viewport_view_states.append({
+                "space": space,
+                "region_3d": rv3d,
+                "view_location": rv3d.view_location.copy(),
+                "view_distance": rv3d.view_distance,
+                "view_rotation": rv3d.view_rotation.copy(),
+                "view_perspective": rv3d.view_perspective,
+            })
+        except Exception:
+            pass
+
+
+def focus_viewports_on_board(rt, context):
+    board_height_world = BOARD_HEIGHT * CELL_SIZE
+    board_width_world = BOARD_WIDTH * CELL_SIZE
+    view_distance = max(board_height_world, board_width_world) * 1.05
+    # Front-like view for an X-Z board: look along the Y axis so X is horizontal
+    # and Z is vertical. This modifies only RegionView3D, never scene cameras.
+    board_view_rotation = Euler((1.57079632679, 0.0, 0.0), "XYZ").to_quaternion()
+    for area, space in iter_view3d_spaces(context):
+        rv3d = getattr(space, "region_3d", None)
+        if rv3d is None:
+            continue
+        try:
+            rv3d.view_perspective = "ORTHO"
+            rv3d.view_location = rt.origin.copy()
+            rv3d.view_distance = view_distance
+            rv3d.view_rotation = board_view_rotation
+            area.tag_redraw()
+        except Exception:
+            pass
+
+
+def restore_view_states(rt):
+    for state in rt.viewport_view_states:
+        rv3d = state.get("region_3d")
+        try:
+            if state.get("view_perspective") is not None:
+                rv3d.view_perspective = state["view_perspective"]
+            if state.get("view_location") is not None:
+                rv3d.view_location = state["view_location"]
+            if state.get("view_distance") is not None:
+                rv3d.view_distance = state["view_distance"]
+            if state.get("view_rotation") is not None:
+                rv3d.view_rotation = state["view_rotation"]
+        except Exception:
+            pass
+    rt.viewport_view_states.clear()
 
 
 def init_game_state(rt):
@@ -781,8 +853,9 @@ def cleanup_runtime(context):
             pass
         rt.draw_handle = None
     restore_viewports(rt)
-    remove_temp_data(rt)
+    restore_view_states(rt)
     restore_source_object_visibility(rt)
+    remove_temp_data(rt)
     restore_object_mode_and_active(rt, context)
     rt.active_objects.clear()
     rt.fixed_objects.clear()
@@ -829,7 +902,9 @@ class OBJECT_OT_tetris_mode_start(bpy.types.Operator):
             create_temp_collection(rt, context)
             create_shared_mesh(rt)
             save_viewports(rt, context)
+            save_view_states(rt, context)
             set_game_viewports(rt, context)
+            focus_viewports_on_board(rt, context)
             init_game_state(rt)
             spawn_next_as_current(rt)
             if not rt.game.game_over:
