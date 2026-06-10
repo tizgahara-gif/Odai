@@ -33,6 +33,7 @@ INITIAL_FALL_INTERVAL = 0.8
 SPEEDUP_SECONDS = 30.0
 SPEEDUP_FACTOR = 0.9
 MIN_FALL_INTERVAL = 0.08
+DROP_INPUT_LOCK_SECONDS = 0.5
 SPAWN_X = BOARD_WIDTH // 2 - 2
 SCORE_LINE_CLEAR = {0: 0, 1: 100, 2: 300, 3: 500, 4: 800}
 
@@ -110,6 +111,7 @@ class TetrisGameState:
     next_piece: str | None = None
     bag: list = field(default_factory=list)
     score: int = 0
+    piece_spawn_time: float = 0.0
     start_time: float = 0.0
     last_fall_time: float = 0.0
     game_over: bool = False
@@ -372,6 +374,7 @@ def spawn_next_as_current(rt):
     kind = rt.game.next_piece or draw_from_bag(rt)
     rt.game.next_piece = draw_from_bag(rt)
     rt.game.current_piece = make_spawn_piece(kind)
+    rt.game.piece_spawn_time = time.monotonic()
     if collides(rt, rt.game.current_piece):
         set_game_over(rt)
 
@@ -465,12 +468,22 @@ def update_active_piece_objects(rt):
         apply_piece_color(obj, piece.kind)
 
 
+def is_drop_input_locked(rt):
+    if rt.game is None:
+        return False
+    return (time.monotonic() - rt.game.piece_spawn_time) < DROP_INPUT_LOCK_SECONDS
+
+
 def handle_key(rt, context, key_type):
     if key_type in {"A", "FOUR", "NUMPAD_4"}:
         return try_move(rt, -1, 0)
     if key_type in {"D", "SIX", "NUMPAD_6"}:
         return try_move(rt, 1, 0)
     if key_type in {"S", "TWO", "NUMPAD_2"}:
+        # Consume manual drop inputs during the short post-spawn lockout; do not
+        # pass them through to Blender, and do not pause automatic gravity.
+        if is_drop_input_locked(rt):
+            return True
         if try_move(rt, 0, -1):
             rt.game.score += 1
         else:
@@ -481,6 +494,8 @@ def handle_key(rt, context, key_type):
     if key_type in {"R", "NINE", "NUMPAD_9"}:
         return try_rotate(rt, 1)
     if key_type in {"RET", "NUMPAD_ENTER"}:
+        if is_drop_input_locked(rt):
+            return True
         hard_drop(rt)
         return True
     return False
@@ -633,8 +648,9 @@ def draw_overlay():
         right_x = max(20, width - 175)
         top_y = max(180, height - 45)
         draw_text(f"SCORE {rt.game.score}", right_x, top_y, 20, (1, 1, 1, 1))
-        draw_text("NEXT", right_x, top_y - 34, 15, (0.9, 0.9, 0.9, 1))
-        draw_mini_piece(shader, rt.game.next_piece, right_x, top_y - 115)
+        next_x, next_y = get_next_preview_origin(rt, region, rv3d, width, height)
+        draw_text("NEXT", next_x, next_y + 78, 15, (0.9, 0.9, 0.9, 1))
+        draw_mini_piece(shader, rt.game.next_piece, next_x, next_y)
         if rt.game.game_over:
             draw_rect(shader, 0, 0, width, height, (0.0, 0.0, 0.0, 0.18))
             # 2D overlay projection uses the current draw context and falls back
@@ -655,6 +671,40 @@ def draw_overlay():
             gpu.state.blend_set("NONE")
         except Exception:
             pass
+
+
+def get_board_rect_2d(rt, region, rv3d):
+    points = []
+    for x, y in ((-0.5, -0.5), (BOARD_WIDTH - 0.5, -0.5), (BOARD_WIDTH - 0.5, BOARD_HEIGHT - 0.5), (-0.5, BOARD_HEIGHT - 0.5)):
+        projected = project_board_point(rt, region, rv3d, x, y)
+        if projected is not None:
+            points.append(projected)
+    if len(points) < 2:
+        return None
+    return (
+        min(point.x for point in points),
+        max(point.x for point in points),
+        min(point.y for point in points),
+        max(point.y for point in points),
+    )
+
+
+def get_next_preview_origin(rt, region, rv3d, width, height):
+    cell = 14
+    gap = 2
+    preview_w = cell * 4 + gap * 3 + 12
+    preview_h = cell * 4 + gap * 3 + 12
+    board_rect = get_board_rect_2d(rt, region, rv3d)
+    if board_rect is not None:
+        _min_x, max_x, min_y, max_y = board_rect
+        x = max_x + 24
+        y = (min_y + max_y) * 0.5 - preview_h * 0.5
+    else:
+        x = width - 175
+        y = height * 0.5 - preview_h * 0.5
+    x = max(20, min(x, width - preview_w - 20))
+    y = max(20, min(y, height - preview_h - 20))
+    return x, y
 
 
 def get_board_center_2d(rt, region, rv3d, width, height):
