@@ -34,7 +34,6 @@ SPEEDUP_SECONDS = 30.0
 SPEEDUP_FACTOR = 0.9
 MIN_FALL_INTERVAL = 0.08
 SPAWN_X = BOARD_WIDTH // 2 - 2
-SPAWN_Y = BOARD_HEIGHT
 SCORE_LINE_CLEAR = {0: 0, 1: 100, 2: 300, 3: 500, 4: 800}
 
 PIECE_KINDS = ("I", "O", "T", "S", "Z", "J", "L")
@@ -99,8 +98,8 @@ PIECE_SHAPES = {
 @dataclass
 class PieceState:
     kind: str
-    x: int = SPAWN_X
-    y: int = SPAWN_Y
+    x: int
+    y: int
     rotation: int = 0
 
 
@@ -371,6 +370,9 @@ class OBJECT_OT_tetris_mode_start(bpy.types.Operator):
             self._game.bag = make_bag()
         return self._game.bag.pop(0)
 
+    # Spawn Y is shape-dependent. Do not create spawn pieces with
+    # PieceState(kind) directly; use this helper so the lowest occupied cell
+    # starts at BOARD_HEIGHT, one row above the visible board.
     def _make_spawn_piece(self, kind):
         shape = PIECE_SHAPES[kind][0]
         min_local_y = min(dy for _dx, dy in shape)
@@ -417,6 +419,8 @@ class OBJECT_OT_tetris_mode_start(bpy.types.Operator):
                 return True
             if y < 0:
                 return True
+            # Cells above BOARD_HEIGHT are allowed while a piece is
+            # spawning/falling in; top-out is checked when the piece locks.
             if y >= BOARD_HEIGHT:
                 continue
             if self._game.board[y][x] is not None:
@@ -523,6 +527,9 @@ class OBJECT_OT_tetris_mode_start(bpy.types.Operator):
         if piece is None or self._game.game_over:
             return
         cells = self._piece_cells(piece)
+        # If a piece locks while any occupied cell is still above the visible
+        # board, that is a top-out game over. Do not discard those cells and
+        # continue gameplay.
         if any(y >= BOARD_HEIGHT for _x, y in cells):
             self._set_game_over()
             return
@@ -584,52 +591,64 @@ class OBJECT_OT_tetris_mode_start(bpy.types.Operator):
         self._game.game_over = True
         self._delete_active_piece_objects()
 
-    def _draw_overlay(self):
+    def _get_draw_context(self):
         context = bpy.context
         region = getattr(context, "region", None)
+        space_data = getattr(context, "space_data", None)
+        rv3d = getattr(space_data, "region_3d", None) if space_data else None
+        if region is None:
+            return None, None, None, None
+        return context, region, space_data, rv3d
+
+    def _draw_overlay(self):
+        context, region, space_data, rv3d = self._get_draw_context()
         if region is None or self._game is None:
             return
         shader = gpu.shader.from_builtin("UNIFORM_COLOR")
         try:
             gpu.state.blend_set("ALPHA")
+            width = region.width
+            height = region.height
+            right_x = max(20, width - 175)
+            top_y = max(180, height - 45)
+            draw_text(f"SCORE {self._game.score}", right_x, top_y, 20, (1, 1, 1, 1))
+            draw_text("NEXT", right_x, top_y - 34, 15, (0.9, 0.9, 0.9, 1))
+            self._draw_mini_piece(shader, self._game.next_piece, right_x, top_y - 115)
+            hold_y = 115
+            draw_text("HOLD", right_x, hold_y + 75, 15, (0.9, 0.9, 0.9, 1))
+            self._draw_mini_piece(shader, self._game.hold_piece, right_x, hold_y)
+            if self._game.game_over:
+                draw_rect(shader, 0, 0, width, height, (0.0, 0.0, 0.0, 0.18))
+                # 2D overlay projection uses the current draw context and falls
+                # back safely when projection is unavailable. This keeps the
+                # single-handler overlay robust across split/changed viewports.
+                self._draw_board_gray_overlay(region, rv3d, shader, width, height)
+                cx, cy = self._get_board_center_2d(region, rv3d, width, height)
+                draw_text("GAME OVER", cx, cy + 22, 46, (1.0, 0.25, 0.2, 1.0), align="CENTER")
+                draw_text(f"SCORE {self._game.score}", cx, cy - 28, 26, (1.0, 1.0, 1.0, 1.0), align="CENTER")
+                draw_text("Press Esc or Enter", cx, cy - 62, 16, (0.9, 0.9, 0.9, 1.0), align="CENTER")
         except Exception:
+            # Draw handlers should never stop the modal operator because a
+            # viewport context changed while Blender was redrawing.
             pass
-        width = region.width
-        height = region.height
-        right_x = max(20, width - 175)
-        top_y = max(180, height - 45)
-        draw_text(f"SCORE {self._game.score}", right_x, top_y, 20, (1, 1, 1, 1))
-        draw_text("NEXT", right_x, top_y - 34, 15, (0.9, 0.9, 0.9, 1))
-        self._draw_mini_piece(shader, self._game.next_piece, right_x, top_y - 115)
-        hold_y = 115
-        draw_text("HOLD", right_x, hold_y + 75, 15, (0.9, 0.9, 0.9, 1))
-        self._draw_mini_piece(shader, self._game.hold_piece, right_x, hold_y)
-        if self._game.game_over:
-            draw_rect(shader, 0, 0, width, height, (0.0, 0.0, 0.0, 0.18))
-            self._draw_board_gray_overlay(context, shader, width, height)
-            cx, cy = self._get_board_center_2d(context, region, width, height)
-            draw_text("GAME OVER", cx, cy + 22, 46, (1.0, 0.25, 0.2, 1.0), align="CENTER")
-            draw_text(f"SCORE {self._game.score}", cx, cy - 28, 26, (1.0, 1.0, 1.0, 1.0), align="CENTER")
-            draw_text("Press Esc or Enter", cx, cy - 62, 16, (0.9, 0.9, 0.9, 1.0), align="CENTER")
-        try:
-            gpu.state.blend_set("NONE")
-        except Exception:
-            pass
+        finally:
+            try:
+                gpu.state.blend_set("NONE")
+            except Exception:
+                pass
 
-    def _get_board_center_2d(self, context, region, width, height):
-        space_data = getattr(context, "space_data", None)
-        rv3d = getattr(space_data, "region_3d", None) if space_data else None
-        if rv3d is not None:
-            center_world = self._world_from_grid((BOARD_WIDTH - 1) / 2.0, (BOARD_HEIGHT - 1) / 2.0)
-            projected = location_3d_to_region_2d(region, rv3d, center_world)
-            if projected is not None:
-                return projected.x, projected.y
+    def _get_board_center_2d(self, region, rv3d, width, height):
+        if region is not None and rv3d is not None:
+            try:
+                center_world = self._world_from_grid((BOARD_WIDTH - 1) / 2.0, (BOARD_HEIGHT - 1) / 2.0)
+                projected = location_3d_to_region_2d(region, rv3d, center_world)
+                if projected is not None:
+                    return projected.x, projected.y
+            except Exception:
+                pass
         return width / 2.0, height / 2.0
 
-    def _draw_board_gray_overlay(self, context, shader, region_width, region_height):
-        region = getattr(context, "region", None)
-        space_data = getattr(context, "space_data", None)
-        rv3d = getattr(space_data, "region_3d", None) if space_data else None
+    def _draw_board_gray_overlay(self, region, rv3d, shader, region_width, region_height):
         points = []
         if region is not None and rv3d is not None:
             board_corners = (
@@ -639,7 +658,10 @@ class OBJECT_OT_tetris_mode_start(bpy.types.Operator):
                 self._world_from_grid(-0.5, BOARD_HEIGHT - 0.5),
             )
             for corner in board_corners:
-                projected = location_3d_to_region_2d(region, rv3d, corner)
+                try:
+                    projected = location_3d_to_region_2d(region, rv3d, corner)
+                except Exception:
+                    projected = None
                 if projected is not None:
                     points.append(projected)
         if len(points) >= 2:
