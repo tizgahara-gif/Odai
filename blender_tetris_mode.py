@@ -40,6 +40,14 @@ MIN_FALL_INTERVAL = 0.08
 DROP_INPUT_LOCK_SECONDS = 0.5
 SPAWN_X = BOARD_WIDTH // 2 - 2
 LINE_CLEAR_BASE_SCORES = {0: 0, 1: 100, 2: 300, 3: 500, 4: 800}
+RANDOM_MINO_START_LEVEL = 30
+RANDOM_MINO_BASE_CHANCE = 0.20
+RANDOM_MINO_CHANCE_PER_LEVEL = 0.02
+RANDOM_MINO_MAX_CHANCE = 0.50
+RANDOM_MINO_GRID_SIZE = 4
+RANDOM_MINO_CELL_COUNT_WEIGHTS = {4: 80, 5: 20}
+RANDOM_MINO_COLOR_4 = (1.0, 0.55, 0.15, 1.0)
+RANDOM_MINO_COLOR_5 = (1.0, 0.25, 0.15, 1.0)
 
 PIECE_KINDS = ("I", "O", "T", "S", "Z", "J", "L")
 PIECE_COLORS = {
@@ -101,18 +109,29 @@ PIECE_SHAPES = {
 
 
 @dataclass
+class NextPieceData:
+    kind: str
+    custom_cells: list | None = None
+    color: tuple | None = None
+    cell_count: int = 4
+
+
+@dataclass
 class PieceState:
     kind: str
     x: int
     y: int
     rotation: int = 0
+    custom_cells: list | None = None
+    color: tuple | None = None
+    cell_count: int = 4
 
 
 @dataclass
 class TetrisGameState:
     board: list = field(default_factory=lambda: [[None for _ in range(BOARD_WIDTH)] for _ in range(BOARD_HEIGHT)])
     current_piece: PieceState | None = None
-    next_piece: str | None = None
+    next_piece: NextPieceData | None = None
     bag: list = field(default_factory=list)
     score: int = 0
     level: int = 1
@@ -437,6 +456,108 @@ def make_bag():
     return bag
 
 
+def choose_random_mino_cell_count():
+    counts = list(RANDOM_MINO_CELL_COUNT_WEIGHTS.keys())
+    weights = list(RANDOM_MINO_CELL_COUNT_WEIGHTS.values())
+    return random.choices(counts, weights=weights, k=1)[0]
+
+
+def normalize_mino_cells(cells):
+    min_x = min(x for x, _y in cells)
+    min_y = min(y for _x, y in cells)
+    return sorted((x - min_x, y - min_y) for x, y in cells)
+
+
+def is_orthogonally_connected(cells):
+    if not cells:
+        return False
+    cell_set = set(cells)
+    visited = set()
+    stack = [cells[0]]
+    while stack:
+        x, y = stack.pop()
+        if (x, y) in visited:
+            continue
+        visited.add((x, y))
+        for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+            if (nx, ny) in cell_set and (nx, ny) not in visited:
+                stack.append((nx, ny))
+    return len(visited) == len(cell_set)
+
+
+def is_valid_random_mino_cells(cells, grid_size=RANDOM_MINO_GRID_SIZE):
+    if not cells or len(set(cells)) != len(cells):
+        return False
+    for x, y in cells:
+        if x < 0 or y < 0 or x >= grid_size or y >= grid_size:
+            return False
+    return is_orthogonally_connected(cells)
+
+
+def generate_random_mino_cells(cell_count=None, grid_size=RANDOM_MINO_GRID_SIZE):
+    if cell_count is None:
+        cell_count = choose_random_mino_cell_count()
+    cell_count = max(1, min(int(cell_count), grid_size * grid_size))
+
+    for _attempt in range(300):
+        cells = {(random.randrange(grid_size), random.randrange(grid_size))}
+        while len(cells) < cell_count:
+            bx, by = random.choice(tuple(cells))
+            candidates = [
+                (bx + 1, by),
+                (bx - 1, by),
+                (bx, by + 1),
+                (bx, by - 1),
+            ]
+            candidates = [
+                candidate
+                for candidate in candidates
+                if 0 <= candidate[0] < grid_size and 0 <= candidate[1] < grid_size and candidate not in cells
+            ]
+            if not candidates:
+                break
+            cells.add(random.choice(candidates))
+        result = list(cells)
+        if len(result) == cell_count and is_valid_random_mino_cells(result, grid_size):
+            return normalize_mino_cells(result)
+
+    if cell_count >= 5:
+        return [(0, 0), (1, 0), (2, 0), (1, 1), (1, 2)]
+    return [(0, 0), (1, 0), (0, 1), (1, 1)]
+
+
+def rotate_custom_cells(cells, rotation):
+    result = list(cells)
+    for _ in range(rotation % 4):
+        result = [(y, RANDOM_MINO_GRID_SIZE - 1 - x) for x, y in result]
+        result = normalize_mino_cells(result)
+    return result
+
+
+def should_spawn_random_mino(game):
+    if game.level < RANDOM_MINO_START_LEVEL:
+        return False
+    chance = min(
+        RANDOM_MINO_MAX_CHANCE,
+        RANDOM_MINO_BASE_CHANCE + (game.level - RANDOM_MINO_START_LEVEL) * RANDOM_MINO_CHANCE_PER_LEVEL,
+    )
+    return random.random() < chance
+
+
+def make_random_next_piece_data():
+    cell_count = choose_random_mino_cell_count()
+    cells = generate_random_mino_cells(cell_count=cell_count)
+    cell_count = len(cells)
+    color = RANDOM_MINO_COLOR_5 if cell_count >= 5 else RANDOM_MINO_COLOR_4
+    return NextPieceData(kind="RANDOM", custom_cells=cells, color=color, cell_count=cell_count)
+
+
+def make_next_piece_data(rt):
+    if should_spawn_random_mino(rt.game):
+        return make_random_next_piece_data()
+    return NextPieceData(kind=draw_from_bag(rt), cell_count=4)
+
+
 def draw_text(text, x, y, size=16, color=(1.0, 1.0, 1.0, 1.0), align="LEFT"):
     font_id = 0
     blf.size(font_id, size)
@@ -651,7 +772,7 @@ def init_game_state(rt):
     rt.game.level = calculate_level(rt.game.total_lines_cleared)
     rt.game.fall_interval = calculate_fall_interval(rt.game.level)
     rt.game.bag = make_bag()
-    rt.game.next_piece = draw_from_bag(rt)
+    rt.game.next_piece = make_next_piece_data(rt)
 
 
 def draw_from_bag(rt):
@@ -663,23 +784,42 @@ def draw_from_bag(rt):
 # Spawn Y is shape-dependent. Do not create spawn pieces with PieceState(kind)
 # directly; use this helper so the lowest occupied cell starts at BOARD_HEIGHT,
 # one row above the visible board.
-def make_spawn_piece(kind):
-    shape = PIECE_SHAPES[kind][0]
-    min_local_y = min(dy for _dx, dy in shape)
-    return PieceState(kind=kind, x=SPAWN_X, y=BOARD_HEIGHT - min_local_y, rotation=0)
+def make_spawn_piece(piece_data):
+    if isinstance(piece_data, str):
+        piece_data = NextPieceData(kind=piece_data, cell_count=4)
+    cells = piece_data.custom_cells if piece_data.custom_cells is not None else PIECE_SHAPES[piece_data.kind][0]
+    min_local_y = min(dy for _dx, dy in cells)
+    return PieceState(
+        kind=piece_data.kind,
+        x=SPAWN_X,
+        y=BOARD_HEIGHT - min_local_y,
+        rotation=0,
+        custom_cells=list(piece_data.custom_cells) if piece_data.custom_cells is not None else None,
+        color=piece_data.color,
+        cell_count=piece_data.cell_count,
+    )
 
 
 def spawn_next_as_current(rt):
-    kind = rt.game.next_piece or draw_from_bag(rt)
-    rt.game.next_piece = draw_from_bag(rt)
-    rt.game.current_piece = make_spawn_piece(kind)
+    piece_data = rt.game.next_piece or make_next_piece_data(rt)
+    rt.game.next_piece = make_next_piece_data(rt)
+    rt.game.current_piece = make_spawn_piece(piece_data)
     rt.game.piece_spawn_time = time.monotonic()
     if collides(rt, rt.game.current_piece):
         set_game_over(rt)
 
 
-def apply_piece_color(obj, kind):
-    obj.color = PIECE_COLORS.get(kind, (1.0, 1.0, 1.0, 1.0))
+def get_piece_color(piece_or_kind):
+    if isinstance(piece_or_kind, PieceState) and piece_or_kind.color is not None:
+        return piece_or_kind.color
+    if isinstance(piece_or_kind, NextPieceData) and piece_or_kind.color is not None:
+        return piece_or_kind.color
+    kind = getattr(piece_or_kind, "kind", piece_or_kind)
+    return PIECE_COLORS.get(kind, RANDOM_MINO_COLOR_4 if kind == "RANDOM" else (1.0, 1.0, 1.0, 1.0))
+
+
+def apply_piece_color(obj, piece_or_kind):
+    obj.color = get_piece_color(piece_or_kind)
 
 
 def _hide_get_for_view_layer(obj, view_layer):
@@ -753,18 +893,32 @@ def restore_non_tetris_scene_objects(rt):
     rt.scene_visibility_states.clear()
 
 
+def ensure_active_object_count(rt, count):
+    if rt.temp_collection is None or rt.shared_cube_mesh is None:
+        return
+    while len(rt.active_objects) < count:
+        index = len(rt.active_objects)
+        obj = bpy.data.objects.new(f"{TEMP_PREFIX}Active_Block_{index}", rt.shared_cube_mesh)
+        obj.data = rt.shared_cube_mesh
+        obj.show_name = False
+        obj.hide_render = True
+        rt.temp_collection.objects.link(obj)
+        rt.active_objects.append(obj)
+    while len(rt.active_objects) > count:
+        obj = rt.active_objects.pop()
+        try:
+            bpy.data.objects.remove(obj, do_unlink=True)
+        except ReferenceError:
+            pass
+
+
 def create_active_piece_objects(rt):
     delete_active_piece_objects(rt)
     if rt.temp_collection is None or rt.shared_cube_mesh is None or rt.game.current_piece is None:
         return
-    for i in range(4):
-        obj = bpy.data.objects.new(f"{TEMP_PREFIX}Active_Block_{i}", rt.shared_cube_mesh)
-        obj.data = rt.shared_cube_mesh
-        obj.show_name = False
-        obj.hide_render = True
-        apply_piece_color(obj, rt.game.current_piece.kind)
-        rt.temp_collection.objects.link(obj)
-        rt.active_objects.append(obj)
+    ensure_active_object_count(rt, len(piece_cells(rt.game.current_piece)))
+    for obj in rt.active_objects:
+        apply_piece_color(obj, rt.game.current_piece)
 
 
 def delete_active_piece_objects(rt):
@@ -776,8 +930,14 @@ def delete_active_piece_objects(rt):
     rt.active_objects.clear()
 
 
+def piece_local_cells(piece):
+    if piece.custom_cells is not None:
+        return rotate_custom_cells(piece.custom_cells, piece.rotation)
+    return list(PIECE_SHAPES[piece.kind][piece.rotation % 4])
+
+
 def piece_cells(piece):
-    return [(piece.x + dx, piece.y + dy) for dx, dy in PIECE_SHAPES[piece.kind][piece.rotation % 4]]
+    return [(piece.x + dx, piece.y + dy) for dx, dy in piece_local_cells(piece)]
 
 
 def world_from_grid(rt, x, y):
@@ -807,12 +967,14 @@ def update_active_piece_objects(rt):
     piece = rt.game.current_piece
     if piece is None:
         return
-    for obj, (x, y) in zip(rt.active_objects, piece_cells(piece)):
+    cells = piece_cells(piece)
+    ensure_active_object_count(rt, len(cells))
+    for obj, (x, y) in zip(rt.active_objects, cells):
         obj.location = world_from_grid(rt, x, y)
         obj.hide_viewport = y < 0
         obj.hide_render = True
         obj.name = f"{TEMP_PREFIX}Active_{piece.kind}_{x}_{y}"
-        apply_piece_color(obj, piece.kind)
+        apply_piece_color(obj, piece)
 
 
 def is_drop_input_locked(rt):
@@ -852,7 +1014,7 @@ def try_move(rt, dx, dy):
     piece = rt.game.current_piece
     if piece is None:
         return False
-    candidate = PieceState(piece.kind, piece.x + dx, piece.y + dy, piece.rotation)
+    candidate = PieceState(piece.kind, piece.x + dx, piece.y + dy, piece.rotation, piece.custom_cells, piece.color, piece.cell_count)
     if collides(rt, candidate):
         return False
     rt.game.current_piece = candidate
@@ -866,7 +1028,7 @@ def try_rotate(rt, direction):
         return False
     new_rot = (piece.rotation + direction) % 4
     for kick in (0, -1, 1, -2, 2):
-        candidate = PieceState(piece.kind, piece.x + kick, piece.y, new_rot)
+        candidate = PieceState(piece.kind, piece.x + kick, piece.y, new_rot, piece.custom_cells, piece.color, piece.cell_count)
         if not collides(rt, candidate):
             rt.game.current_piece = candidate
             update_active_piece_objects(rt)
@@ -912,7 +1074,7 @@ def lock_current_piece(rt):
             obj.name = f"{TEMP_PREFIX}Fixed_{piece.kind}_{x}_{y}"
             obj.location = world_from_grid(rt, x, y)
             obj.hide_viewport = False
-            apply_piece_color(obj, piece.kind)
+            apply_piece_color(obj, piece)
             rt.fixed_objects[(x, y)] = obj
             rt.game.board[y][x] = piece.kind
         else:
@@ -1146,17 +1308,20 @@ def draw_board_gray_overlay(rt, region, rv3d, shader, region_width, region_heigh
     draw_rect(shader, (region_width - fallback_w) * 0.5, (region_height - fallback_h) * 0.5, fallback_w, fallback_h, (0.45, 0.45, 0.45, 0.58))
 
 
-def draw_mini_piece(shader, kind, x, y):
+def draw_mini_piece(shader, piece_data, x, y):
     cell = 14
     gap = 2
     draw_rect(shader, x - 6, y - 6, cell * 4 + gap * 3 + 12, cell * 4 + gap * 3 + 12, (0.02, 0.02, 0.02, 0.45))
     for gx in range(4):
         for gy in range(4):
             draw_rect(shader, x + gx * (cell + gap), y + gy * (cell + gap), cell, cell, (0.15, 0.15, 0.15, 0.45))
-    if not kind:
+    if not piece_data:
         return
-    color = PIECE_COLORS[kind]
-    for dx, dy in PIECE_SHAPES[kind][0]:
+    if isinstance(piece_data, str):
+        piece_data = NextPieceData(kind=piece_data, cell_count=4)
+    color = get_piece_color(piece_data)
+    cells = piece_data.custom_cells if piece_data.custom_cells is not None else PIECE_SHAPES[piece_data.kind][0]
+    for dx, dy in cells:
         draw_rect(shader, x + dx * (cell + gap), y + dy * (cell + gap), cell, cell, color)
 
 
