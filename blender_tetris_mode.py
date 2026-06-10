@@ -32,13 +32,14 @@ BOARD_VIEW_EXTRA_PADDING = 1.1
 TEMP_COLLECTION_NAME = "Tetris_Temporary_Collection"
 TEMP_PREFIX = "Tetris_"
 TIMER_INTERVAL = 0.03
-INITIAL_FALL_INTERVAL = 0.8
-SPEEDUP_SECONDS = 30.0
-SPEEDUP_FACTOR = 0.9
+BASE_FALL_INTERVAL = 0.8
+LEVEL_SPEED_MULTIPLIER = 0.88
+LEVEL_SCORE_BONUS = 0.2
+LINES_PER_LEVEL = 10
 MIN_FALL_INTERVAL = 0.08
 DROP_INPUT_LOCK_SECONDS = 0.5
 SPAWN_X = BOARD_WIDTH // 2 - 2
-SCORE_LINE_CLEAR = {0: 0, 1: 100, 2: 300, 3: 500, 4: 800}
+LINE_CLEAR_BASE_SCORES = {0: 0, 1: 100, 2: 300, 3: 500, 4: 800}
 
 PIECE_KINDS = ("I", "O", "T", "S", "Z", "J", "L")
 PIECE_COLORS = {
@@ -114,6 +115,9 @@ class TetrisGameState:
     next_piece: str | None = None
     bag: list = field(default_factory=list)
     score: int = 0
+    level: int = 1
+    total_lines_cleared: int = 0
+    fall_interval: float = BASE_FALL_INTERVAL
     piece_spawn_time: float = 0.0
     start_time: float = 0.0
     last_fall_time: float = 0.0
@@ -138,6 +142,12 @@ class TetrisRuntimeState:
     bgm_sound: object | None = None
     bgm_handle: object | None = None
     bgm_filepath: str | None = None
+    bgm_loop: bool = False
+    bgm_volume: float = 0.35
+    bgm_started: bool = False
+    bgm_stopping: bool = False
+    bgm_play_started_at: float = 0.0
+    bgm_duration: float | None = None
     cleaned: bool = False
 
 
@@ -154,6 +164,12 @@ class BGMTestRuntime:
     bgm_sound: object | None = None
     bgm_handle: object | None = None
     bgm_filepath: str | None = None
+    bgm_loop: bool = False
+    bgm_volume: float = 0.35
+    bgm_started: bool = False
+    bgm_stopping: bool = False
+    bgm_play_started_at: float = 0.0
+    bgm_duration: float | None = None
 
 
 _TETRIS_RUNTIME: TetrisRuntimeState | None = None
@@ -196,6 +212,71 @@ def _bgm_fail(message, filepath=None, log_prefix="[Tetris Mode][BGM]"):
     return BGMStartResult(False, message, filepath)
 
 
+def play_bgm_once(rt, log_prefix="[Tetris Mode][BGM]"):
+    filepath = getattr(rt, "bgm_filepath", None)
+    if not filepath:
+        return _bgm_fail("BGM filepath is empty.", log_prefix=log_prefix)
+
+    try:
+        import aud
+        print(f"{log_prefix} aud import ok")
+    except Exception as exc:
+        return _bgm_fail(f"Failed to import Blender aud module: {exc}", filepath, log_prefix)
+
+    try:
+        sound = aud.Sound(filepath)
+        print(f"{log_prefix} aud.Sound() created")
+    except Exception as exc:
+        return _bgm_fail(f"aud.Sound() failed. Try WAV/OGG if this is MP3. Error: {exc}", filepath, log_prefix)
+
+    try:
+        device = aud.Device()
+        print(f"{log_prefix} device created")
+    except Exception as exc:
+        return _bgm_fail(f"aud.Device() failed. Check Blender audio device/preferences. Error: {exc}", filepath, log_prefix)
+
+    try:
+        handle = device.play(sound)
+        print(f"{log_prefix} playback started")
+    except Exception as exc:
+        return _bgm_fail(f"device.play() failed: {exc}", filepath, log_prefix)
+
+    volume = float(getattr(rt, "bgm_volume", 0.35))
+    print(f"{log_prefix} volume: {volume}")
+    try:
+        handle.volume = volume
+        print(f"{log_prefix} volume applied")
+    except Exception as exc:
+        print(f"{log_prefix} Failed to set volume: {exc}")
+
+    duration = None
+    try:
+        length_attr = getattr(sound, "length", None)
+        length_value = length_attr() if callable(length_attr) else length_attr
+        duration = float(length_value)
+        if duration <= 0:
+            duration = None
+        else:
+            print(f"{log_prefix} sound duration: {duration}")
+    except Exception as exc:
+        print(f"{log_prefix} sound length unavailable: {exc}")
+
+    try:
+        print(f"{log_prefix} handle status: {handle.status}")
+    except Exception as exc:
+        print(f"{log_prefix} handle status unavailable: {exc}")
+
+    rt.bgm_device = device
+    rt.bgm_sound = sound
+    rt.bgm_handle = handle
+    rt.bgm_started = True
+    rt.bgm_stopping = False
+    rt.bgm_play_started_at = time.monotonic()
+    rt.bgm_duration = duration
+    print(f"{log_prefix} playback retained: {filepath}")
+    return BGMStartResult(True, f"BGM started: {filepath}", filepath)
+
+
 def start_bgm(rt, context, *, for_test=False, log_prefix="[Tetris Mode][BGM]"):
     print(f"{log_prefix} resolving preferences")
     prefs = get_addon_preferences(context)
@@ -223,58 +304,24 @@ def start_bgm(rt, context, *, for_test=False, log_prefix="[Tetris Mode][BGM]"):
     if not exists:
         return _bgm_fail(f"BGM file does not exist: {filepath}", filepath, log_prefix)
 
-    try:
-        import aud
-        print(f"{log_prefix} aud import ok")
-    except Exception as exc:
-        return _bgm_fail(f"Failed to import Blender aud module: {exc}", filepath, log_prefix)
-
-    try:
-        sound = aud.Sound(filepath)
-        print(f"{log_prefix} aud.Sound() created")
-    except Exception as exc:
-        return _bgm_fail(f"aud.Sound() failed. Try WAV/OGG if this is MP3. Error: {exc}", filepath, log_prefix)
-
-    if getattr(prefs, "bgm_loop", True) and not for_test:
-        print(f"{log_prefix} Loop is currently disabled because this Blender aud API does not expose Factory.loop().")
+    rt.bgm_filepath = filepath
+    rt.bgm_volume = float(getattr(prefs, "bgm_volume", 0.35))
+    rt.bgm_loop = bool(getattr(prefs, "bgm_loop", True)) and not for_test
+    rt.bgm_stopping = False
+    rt.bgm_started = False
+    rt.bgm_play_started_at = 0.0
+    rt.bgm_duration = None
+    if rt.bgm_loop:
+        print(f"{log_prefix} timer-based loop enabled")
     else:
         print(f"{log_prefix} loop {'disabled for test' if for_test else 'disabled'}")
-
-    try:
-        device = aud.Device()
-        print(f"{log_prefix} device created")
-    except Exception as exc:
-        return _bgm_fail(f"aud.Device() failed. Check Blender audio device/preferences. Error: {exc}", filepath, log_prefix)
-
-    try:
-        handle = device.play(sound)
-        print(f"{log_prefix} playback started")
-    except Exception as exc:
-        return _bgm_fail(f"device.play() failed: {exc}", filepath, log_prefix)
-
-    volume = float(getattr(prefs, "bgm_volume", 0.35))
-    print(f"{log_prefix} volume: {volume}")
-    try:
-        handle.volume = volume
-        print(f"{log_prefix} volume applied")
-    except Exception as exc:
-        print(f"{log_prefix} Failed to set volume: {exc}")
-
-    try:
-        print(f"{log_prefix} handle status: {handle.status}")
-    except Exception as exc:
-        print(f"{log_prefix} handle status unavailable: {exc}")
-
-    rt.bgm_device = device
-    rt.bgm_sound = sound
-    rt.bgm_handle = handle
-    rt.bgm_filepath = filepath
-    message = f"BGM started: {filepath}"
-    print(f"{log_prefix} {message}")
-    return BGMStartResult(True, message, filepath)
+    return play_bgm_once(rt, log_prefix)
 
 
 def stop_bgm(rt):
+    if rt is None:
+        return
+    rt.bgm_stopping = True
     handle = getattr(rt, "bgm_handle", None)
     if handle is not None:
         try:
@@ -286,6 +333,61 @@ def stop_bgm(rt):
     rt.bgm_sound = None
     rt.bgm_device = None
     rt.bgm_filepath = None
+    rt.bgm_started = False
+    rt.bgm_loop = False
+    rt.bgm_duration = None
+    rt.bgm_play_started_at = 0.0
+
+
+def update_bgm_loop(rt):
+    if rt is None or getattr(rt, "bgm_stopping", False):
+        return
+    if not getattr(rt, "bgm_loop", False) or not getattr(rt, "bgm_filepath", None):
+        return
+
+    handle = getattr(rt, "bgm_handle", None)
+    should_restart = False
+
+    duration = getattr(rt, "bgm_duration", None)
+    if duration is not None:
+        try:
+            elapsed = time.monotonic() - float(getattr(rt, "bgm_play_started_at", 0.0))
+            if elapsed >= max(0.1, float(duration) - 0.05):
+                should_restart = True
+        except Exception:
+            pass
+
+    if not should_restart and handle is None:
+        should_restart = True
+
+    if not should_restart and handle is not None:
+        try:
+            status = getattr(handle, "status", None)
+            if callable(status):
+                status = status()
+        except Exception:
+            status = None
+        if status is not None:
+            status_text = str(status).lower()
+            if "stop" in status_text or "invalid" in status_text or "end" in status_text or status_text in {"0", "false"}:
+                should_restart = True
+
+    if not should_restart:
+        return
+
+    if handle is not None:
+        try:
+            handle.stop()
+        except Exception:
+            pass
+    rt.bgm_handle = None
+    rt.bgm_sound = None
+    rt.bgm_device = None
+    print("[Tetris Mode][BGM] loop restarting from beginning")
+    result = play_bgm_once(rt, "[Tetris Mode][BGM]")
+    if not result.ok:
+        print(f"[Tetris Mode][BGM] loop restart failed: {result.message}")
+        rt.bgm_loop = False
 
 
 def stop_test_bgm():
@@ -293,6 +395,7 @@ def stop_test_bgm():
     rt = _BGM_TEST_RUNTIME
     if rt is not None:
         handle = getattr(rt, "bgm_handle", None)
+        rt.bgm_stopping = True
         if handle is not None:
             try:
                 handle.stop()
@@ -346,6 +449,18 @@ def draw_text(text, x, y, size=16, color=(1.0, 1.0, 1.0, 1.0), align="LEFT"):
     blf.position(font_id, x, y, 0)
     blf.draw(font_id, text)
     return width, height
+
+
+def calculate_level(total_lines_cleared):
+    return max(1, total_lines_cleared // LINES_PER_LEVEL + 1)
+
+
+def calculate_fall_interval(level):
+    return max(MIN_FALL_INTERVAL, BASE_FALL_INTERVAL * (LEVEL_SPEED_MULTIPLIER ** (max(1, level) - 1)))
+
+
+def calculate_score_multiplier(level):
+    return 1.0 + (max(1, level) - 1) * LEVEL_SCORE_BONUS
 
 
 def draw_rect(shader, x, y, w, h, color):
@@ -533,6 +648,8 @@ def restore_view_states(rt):
 def init_game_state(rt):
     now = time.monotonic()
     rt.game = TetrisGameState(start_time=now, last_fall_time=now)
+    rt.game.level = calculate_level(rt.game.total_lines_cleared)
+    rt.game.fall_interval = calculate_fall_interval(rt.game.level)
     rt.game.bag = make_bag()
     rt.game.next_piece = draw_from_bag(rt)
 
@@ -766,9 +883,7 @@ def hard_drop(rt):
 
 
 def current_fall_interval(rt):
-    elapsed = time.monotonic() - rt.game.start_time
-    steps = int(elapsed // SPEEDUP_SECONDS)
-    return max(MIN_FALL_INTERVAL, INITIAL_FALL_INTERVAL * (SPEEDUP_FACTOR ** steps))
+    return max(MIN_FALL_INTERVAL, getattr(rt.game, "fall_interval", BASE_FALL_INTERVAL))
 
 
 def on_timer(rt, context):
@@ -807,7 +922,13 @@ def lock_current_piece(rt):
                 pass
     rt.active_objects.clear()
     cleared = clear_lines(rt)
-    rt.game.score += SCORE_LINE_CLEAR.get(cleared, 0)
+    if cleared > 0:
+        rt.game.total_lines_cleared += cleared
+        rt.game.level = calculate_level(rt.game.total_lines_cleared)
+        rt.game.fall_interval = calculate_fall_interval(rt.game.level)
+        base_score = LINE_CLEAR_BASE_SCORES.get(cleared, 0)
+        multiplier = calculate_score_multiplier(rt.game.level)
+        rt.game.score += int(base_score * multiplier)
     spawn_next_as_current(rt)
     if not rt.game.game_over:
         create_active_piece_objects(rt)
@@ -877,7 +998,8 @@ def draw_overlay():
         draw_board_grid_overlay(rt, region, rv3d, shader, outline_only=False)
         if not rt.game.game_over:
             next_x, next_y = get_next_preview_origin(rt, region, rv3d, width, height)
-            draw_text(f"SCORE {rt.game.score}", next_x, next_y + 108, 20, (1, 1, 1, 1))
+            draw_text(f"LEVEL {rt.game.level}", next_x, next_y + 132, 18, (1, 1, 1, 1))
+            draw_text(f"SCORE {rt.game.score}", next_x, next_y + 108, 18, (1, 1, 1, 1))
             draw_text("NEXT", next_x, next_y + 78, 15, (0.9, 0.9, 0.9, 1))
             draw_mini_piece(shader, rt.game.next_piece, next_x, next_y)
         if rt.game.game_over:
@@ -890,7 +1012,8 @@ def draw_overlay():
             cx, cy = get_board_center_2d(rt, region, rv3d, width, height)
             draw_text("GAME OVER", cx, cy + 22, 46, (1.0, 0.25, 0.2, 1.0), align="CENTER")
             draw_text(f"SCORE {rt.game.score}", cx, cy - 28, 26, (1.0, 1.0, 1.0, 1.0), align="CENTER")
-            draw_text("Press Esc or Enter", cx, cy - 62, 16, (0.9, 0.9, 0.9, 1.0), align="CENTER")
+            draw_text(f"LEVEL {rt.game.level}", cx, cy - 58, 20, (1.0, 1.0, 1.0, 1.0), align="CENTER")
+            draw_text("Press Esc or Enter", cx, cy - 88, 16, (0.9, 0.9, 0.9, 1.0), align="CENTER")
     except Exception:
         # Draw handlers should never stop the modal operator because a viewport
         # context changed while Blender was redrawing.
@@ -923,7 +1046,7 @@ def get_next_preview_origin(rt, region, rv3d, width, height):
     gap = 2
     preview_w = cell * 4 + gap * 3 + 12
     preview_h = cell * 4 + gap * 3 + 12
-    ui_total_h = preview_h + 110
+    ui_total_h = preview_h + 150
     board_rect = get_board_rect_2d(rt, region, rv3d)
     if board_rect is not None:
         _min_x, max_x, min_y, max_y = board_rect
@@ -1282,9 +1405,11 @@ class OBJECT_OT_tetris_mode_start(bpy.types.Operator):
                     cleanup_runtime(context)
                     return {"FINISHED"}
                 if event.type == "TIMER":
+                    update_bgm_loop(rt)
                     tag_redraw_all(context)
                 return {"RUNNING_MODAL"}
             if event.type == "TIMER":
+                update_bgm_loop(rt)
                 on_timer(rt, context)
                 return {"RUNNING_MODAL"}
             if event.value == "PRESS":
