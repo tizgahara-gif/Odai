@@ -142,11 +142,23 @@ class TetrisRuntimeState:
     cleaned: bool = False
 
 
+@dataclass
+class BGMStartResult:
+    ok: bool
+    message: str
+    filepath: str | None = None
+
+
+@dataclass
+class BGMTestRuntime:
+    bgm_device: object | None = None
+    bgm_factory: object | None = None
+    bgm_handle: object | None = None
+    bgm_filepath: str | None = None
+
+
 _TETRIS_RUNTIME: TetrisRuntimeState | None = None
-_BGM_TEST_DEVICE = None
-_BGM_TEST_FACTORY = None
-_BGM_TEST_HANDLE = None
-_BGM_TEST_FILEPATH = None
+_BGM_TEST_RUNTIME: BGMTestRuntime | None = None
 _BGM_TEST_TOKEN = 0
 
 
@@ -160,74 +172,90 @@ def is_tetris_running():
 
 
 def get_addon_preferences(context):
-    addon = context.preferences.addons.get(__name__)
-    if addon is None:
+    addons = getattr(getattr(context, "preferences", None), "addons", None)
+    if addons is None:
         return None
-    return addon.preferences
+
+    addon = addons.get(__name__)
+    if addon is not None:
+        return addon.preferences
+
+    module_name = __name__.split(".")[0]
+    addon = addons.get(module_name)
+    if addon is not None:
+        return addon.preferences
+
+    for key, addon in addons.items():
+        if key == "blender_tetris_mode" or key.endswith("blender_tetris_mode"):
+            return addon.preferences
+
+    return None
 
 
-def play_bgm_from_preferences(context, log_prefix="[Tetris Mode][BGM]", force_duration_label=None):
+def _bgm_fail(message, filepath=None, log_prefix="[Tetris Mode][BGM]"):
+    print(f"{log_prefix} {message}")
+    return BGMStartResult(False, message, filepath)
+
+
+def start_bgm(rt, context, *, for_test=False, log_prefix="[Tetris Mode][BGM]"):
     print(f"{log_prefix} resolving preferences")
     prefs = get_addon_preferences(context)
     if prefs is None:
-        print(f"{log_prefix} preferences not found")
-        return None, None, None, None
+        return _bgm_fail("BGM preferences not found. Re-enable the add-on or reinstall it.", log_prefix=log_prefix)
     print(f"{log_prefix} prefs found")
+
     enabled = bool(getattr(prefs, "bgm_enabled", True))
     print(f"{log_prefix} enabled: {enabled}")
     if not enabled:
-        return None, None, None, None
+        return _bgm_fail("BGM is disabled in Addon Preferences.", log_prefix=log_prefix)
 
     raw_filepath = getattr(prefs, "bgm_filepath", "")
     print(f"{log_prefix} raw filepath: {raw_filepath}")
-    filepath = bpy.path.abspath(raw_filepath) if raw_filepath else ""
+    if not raw_filepath:
+        return _bgm_fail("BGM file is not set.", log_prefix=log_prefix)
+
+    filepath = bpy.path.abspath(raw_filepath)
     print(f"{log_prefix} absolute filepath: {filepath}")
     if not filepath:
-        print(f"{log_prefix} no BGM file configured")
-        return None, None, None, None
+        return _bgm_fail(f"BGM filepath could not be resolved: {raw_filepath}", log_prefix=log_prefix)
 
     exists = os.path.isfile(filepath)
     print(f"{log_prefix} file exists: {exists}")
     if not exists:
-        print(f"{log_prefix} BGM file not found: {filepath}")
-        return None, None, None, None
+        return _bgm_fail(f"BGM file does not exist: {filepath}", filepath, log_prefix)
 
     try:
         import aud
         print(f"{log_prefix} aud import ok")
     except Exception as exc:
-        print(f"{log_prefix} aud import failed: {exc}")
-        return None, None, None, None
+        return _bgm_fail(f"Failed to import Blender aud module: {exc}", filepath, log_prefix)
 
     try:
         factory = aud.Factory.file(filepath)
         print(f"{log_prefix} factory created")
     except Exception as exc:
-        print(f"{log_prefix} factory creation failed: {exc}")
-        return None, None, None, None
+        return _bgm_fail(f"aud.Factory.file() failed. Try WAV/OGG if this is MP3. Error: {exc}", filepath, log_prefix)
 
-    if getattr(prefs, "bgm_loop", True):
+    if getattr(prefs, "bgm_loop", True) and not for_test:
         try:
             factory = factory.loop(-1)
             print(f"{log_prefix} loop applied")
         except Exception as exc:
             print(f"{log_prefix} loop unavailable, playing once: {exc}")
     else:
-        print(f"{log_prefix} loop disabled")
+        print(f"{log_prefix} loop {'disabled for test' if for_test else 'disabled'}")
 
     try:
         device = aud.Device()
         print(f"{log_prefix} device created")
     except Exception as exc:
-        print(f"{log_prefix} device creation failed: {exc}")
-        return None, None, None, None
+        return _bgm_fail(f"aud.Device() failed. Check Blender audio device/preferences. Error: {exc}", filepath, log_prefix)
 
     try:
         handle = device.play(factory)
         print(f"{log_prefix} playback started")
     except Exception as exc:
-        print(f"{log_prefix} device.play failed: {exc}")
-        return device, factory, None, filepath
+        return _bgm_fail(f"device.play() failed: {exc}", filepath, log_prefix)
 
     volume = float(getattr(prefs, "bgm_volume", 0.35))
     print(f"{log_prefix} volume: {volume}")
@@ -235,30 +263,20 @@ def play_bgm_from_preferences(context, log_prefix="[Tetris Mode][BGM]", force_du
         handle.volume = volume
         print(f"{log_prefix} volume applied")
     except Exception as exc:
-        print(f"{log_prefix} volume apply failed: {exc}")
+        print(f"{log_prefix} Failed to set volume: {exc}")
 
     try:
         print(f"{log_prefix} handle status: {handle.status}")
     except Exception as exc:
         print(f"{log_prefix} handle status unavailable: {exc}")
 
-    print(f"{log_prefix} handle retained{f' ({force_duration_label})' if force_duration_label else ''}: {filepath}")
-    return device, factory, handle, filepath
-
-
-def start_bgm(rt, context):
-    try:
-        device, factory, handle, filepath = play_bgm_from_preferences(context, "[Tetris Mode][BGM]")
-        rt.bgm_device = device
-        rt.bgm_factory = factory
-        rt.bgm_handle = handle
-        rt.bgm_filepath = filepath
-    except Exception as exc:
-        print(f"[Tetris Mode][BGM] Failed to play BGM: {exc}")
-        rt.bgm_device = None
-        rt.bgm_factory = None
-        rt.bgm_handle = None
-        rt.bgm_filepath = None
+    rt.bgm_device = device
+    rt.bgm_factory = factory
+    rt.bgm_handle = handle
+    rt.bgm_filepath = filepath
+    message = f"BGM started: {filepath}"
+    print(f"{log_prefix} {message}")
+    return BGMStartResult(True, message, filepath)
 
 
 def stop_bgm(rt):
@@ -276,40 +294,43 @@ def stop_bgm(rt):
 
 
 def stop_test_bgm():
-    global _BGM_TEST_DEVICE, _BGM_TEST_FACTORY, _BGM_TEST_HANDLE, _BGM_TEST_FILEPATH
-    if _BGM_TEST_HANDLE is not None:
-        try:
-            _BGM_TEST_HANDLE.stop()
-            print("[Tetris Mode][BGM Test] stopped")
-        except Exception as exc:
-            print(f"[Tetris Mode][BGM Test] stop failed: {exc}")
-    _BGM_TEST_HANDLE = None
-    _BGM_TEST_FACTORY = None
-    _BGM_TEST_DEVICE = None
-    _BGM_TEST_FILEPATH = None
+    global _BGM_TEST_RUNTIME
+    rt = _BGM_TEST_RUNTIME
+    if rt is not None:
+        handle = getattr(rt, "bgm_handle", None)
+        if handle is not None:
+            try:
+                handle.stop()
+                print("[Tetris Mode][BGM Test] stopped")
+            except Exception as exc:
+                print(f"[Tetris Mode][BGM Test] stop failed: {exc}")
+    _BGM_TEST_RUNTIME = None
 
 
 def start_test_bgm(context):
-    global _BGM_TEST_DEVICE, _BGM_TEST_FACTORY, _BGM_TEST_HANDLE, _BGM_TEST_FILEPATH, _BGM_TEST_TOKEN
+    global _BGM_TEST_RUNTIME, _BGM_TEST_TOKEN
     stop_test_bgm()
     _BGM_TEST_TOKEN += 1
     token = _BGM_TEST_TOKEN
-    device, factory, handle, filepath = play_bgm_from_preferences(context, "[Tetris Mode][BGM Test]", "auto-stop in 5s")
-    _BGM_TEST_DEVICE = device
-    _BGM_TEST_FACTORY = factory
-    _BGM_TEST_HANDLE = handle
-    _BGM_TEST_FILEPATH = filepath
-    if handle is not None:
-        def auto_stop():
-            if token == _BGM_TEST_TOKEN:
-                stop_test_bgm()
-            return None
-        try:
-            bpy.app.timers.register(auto_stop, first_interval=5.0)
-        except Exception as exc:
-            print(f"[Tetris Mode][BGM Test] auto-stop timer failed: {exc}")
-    return handle is not None
+    rt = BGMTestRuntime()
+    result = start_bgm(rt, context, for_test=True, log_prefix="[Tetris Mode][BGM Test]")
+    print(f"[Tetris Mode][BGM Test] Test result: {result.message}")
+    if not result.ok:
+        _BGM_TEST_RUNTIME = None
+        return result
 
+    _BGM_TEST_RUNTIME = rt
+
+    def auto_stop():
+        if token == _BGM_TEST_TOKEN:
+            stop_test_bgm()
+        return None
+
+    try:
+        bpy.app.timers.register(auto_stop, first_interval=5.0)
+    except Exception as exc:
+        print(f"[Tetris Mode][BGM Test] auto-stop timer failed: {exc}")
+    return result
 
 
 def make_bag():
@@ -1090,11 +1111,23 @@ class TETRIS_MODE_OT_test_bgm(bpy.types.Operator):
     bl_options = set()
 
     def execute(self, context):
-        ok = start_test_bgm(context)
-        if ok:
-            self.report({"INFO"}, "Testing BGM for 5 seconds. See System Console for diagnostics.")
-        else:
-            self.report({"WARNING"}, "BGM test did not start. See System Console for diagnostics.")
+        result = start_test_bgm(context)
+        if result.ok:
+            self.report({"INFO"}, result.message)
+            return {"FINISHED"}
+        self.report({"WARNING"}, result.message)
+        return {"CANCELLED"}
+
+
+class TETRIS_MODE_OT_stop_test_bgm(bpy.types.Operator):
+    bl_idname = "tetris_mode.stop_test_bgm"
+    bl_label = "Stop Test BGM"
+    bl_description = "Stop Tetris Mode BGM test playback"
+    bl_options = set()
+
+    def execute(self, context):
+        stop_test_bgm()
+        self.report({"INFO"}, "Stopped BGM test playback.")
         return {"FINISHED"}
 
 
@@ -1129,7 +1162,9 @@ class TetrisModeAddonPreferences(bpy.types.AddonPreferences):
         layout.prop(self, "bgm_volume")
         layout.prop(self, "bgm_loop")
         layout.label(text="If MP3 does not play, test WAV or OGG. Playback depends on Blender/aud codec support.")
-        layout.operator("tetris_mode.test_bgm", text="Test BGM", icon="PLAY")
+        row = layout.row(align=True)
+        row.operator("tetris_mode.test_bgm", text="Test BGM", icon="PLAY")
+        row.operator("tetris_mode.stop_test_bgm", text="Stop Test BGM", icon="CANCEL")
 
 
 class OBJECT_OT_tetris_mode_start(bpy.types.Operator):
@@ -1255,6 +1290,7 @@ class VIEW3D_PT_tetris_mode_panel(bpy.types.Panel):
 
 classes = (
     TETRIS_MODE_OT_test_bgm,
+    TETRIS_MODE_OT_stop_test_bgm,
     TetrisModeAddonPreferences,
     OBJECT_OT_tetris_mode_start,
     VIEW3D_PT_tetris_mode_panel,
