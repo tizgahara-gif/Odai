@@ -108,8 +108,6 @@ class TetrisGameState:
     board: list = field(default_factory=lambda: [[None for _ in range(BOARD_WIDTH)] for _ in range(BOARD_HEIGHT)])
     current_piece: PieceState | None = None
     next_piece: str | None = None
-    hold_piece: str | None = None
-    hold_used: bool = False
     bag: list = field(default_factory=list)
     score: int = 0
     start_time: float = 0.0
@@ -302,7 +300,6 @@ def spawn_next_as_current(rt):
     kind = rt.game.next_piece or draw_from_bag(rt)
     rt.game.next_piece = draw_from_bag(rt)
     rt.game.current_piece = make_spawn_piece(kind)
-    rt.game.hold_used = False
     if collides(rt, rt.game.current_piece):
         set_game_over(rt)
 
@@ -411,9 +408,6 @@ def handle_key(rt, context, key_type):
         return try_rotate(rt, -1)
     if key_type in {"R", "NINE", "NUMPAD_9"}:
         return try_rotate(rt, 1)
-    if key_type in {"E", "FIVE", "NUMPAD_5"}:
-        hold_current_piece(rt)
-        return True
     if key_type in {"RET", "NUMPAD_ENTER"}:
         hard_drop(rt)
         return True
@@ -444,26 +438,6 @@ def try_rotate(rt, direction):
             update_active_piece_objects(rt)
             return True
     return True
-
-
-def hold_current_piece(rt):
-    if rt.game.hold_used or rt.game.current_piece is None:
-        return
-    current_kind = rt.game.current_piece.kind
-    if rt.game.hold_piece is None:
-        rt.game.hold_piece = current_kind
-        spawn_next_as_current(rt)
-    else:
-        swap_kind = rt.game.hold_piece
-        rt.game.hold_piece = current_kind
-        rt.game.current_piece = make_spawn_piece(swap_kind)
-        if collides(rt, rt.game.current_piece):
-            set_game_over(rt)
-    rt.game.hold_used = True
-    if not rt.game.game_over:
-        if len(rt.active_objects) != 4:
-            create_active_piece_objects(rt)
-        update_active_piece_objects(rt)
 
 
 def hard_drop(rt):
@@ -589,9 +563,6 @@ def draw_overlay():
         draw_text(f"SCORE {rt.game.score}", right_x, top_y, 20, (1, 1, 1, 1))
         draw_text("NEXT", right_x, top_y - 34, 15, (0.9, 0.9, 0.9, 1))
         draw_mini_piece(shader, rt.game.next_piece, right_x, top_y - 115)
-        hold_y = 115
-        draw_text("HOLD", right_x, hold_y + 75, 15, (0.9, 0.9, 0.9, 1))
-        draw_mini_piece(shader, rt.game.hold_piece, right_x, hold_y)
         if rt.game.game_over:
             draw_rect(shader, 0, 0, width, height, (0.0, 0.0, 0.0, 0.18))
             # 2D overlay projection uses the current draw context and falls back
@@ -928,7 +899,6 @@ class VIEW3D_PT_tetris_mode_panel(bpy.types.Panel):
         layout.label(text="Move: A/D or 4/6")
         layout.label(text="Rotate: Q/R or 7/9")
         layout.label(text="Drop: S/Enter or 2")
-        layout.label(text="Hold: E or 5")
         layout.label(text="Exit: Esc")
 
 
