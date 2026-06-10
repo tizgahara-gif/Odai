@@ -136,7 +136,7 @@ class TetrisRuntimeState:
     source_object_name: str | None = None
     source_object_hidden: bool | None = None
     bgm_device: object | None = None
-    bgm_factory: object | None = None
+    bgm_sound: object | None = None
     bgm_handle: object | None = None
     bgm_filepath: str | None = None
     cleaned: bool = False
@@ -152,7 +152,7 @@ class BGMStartResult:
 @dataclass
 class BGMTestRuntime:
     bgm_device: object | None = None
-    bgm_factory: object | None = None
+    bgm_sound: object | None = None
     bgm_handle: object | None = None
     bgm_filepath: str | None = None
 
@@ -231,17 +231,13 @@ def start_bgm(rt, context, *, for_test=False, log_prefix="[Tetris Mode][BGM]"):
         return _bgm_fail(f"Failed to import Blender aud module: {exc}", filepath, log_prefix)
 
     try:
-        factory = aud.Factory.file(filepath)
-        print(f"{log_prefix} factory created")
+        sound = aud.Sound(filepath)
+        print(f"{log_prefix} aud.Sound() created")
     except Exception as exc:
-        return _bgm_fail(f"aud.Factory.file() failed. Try WAV/OGG if this is MP3. Error: {exc}", filepath, log_prefix)
+        return _bgm_fail(f"aud.Sound() failed. Try WAV/OGG if this is MP3. Error: {exc}", filepath, log_prefix)
 
     if getattr(prefs, "bgm_loop", True) and not for_test:
-        try:
-            factory = factory.loop(-1)
-            print(f"{log_prefix} loop applied")
-        except Exception as exc:
-            print(f"{log_prefix} loop unavailable, playing once: {exc}")
+        print(f"{log_prefix} Loop is currently disabled because this Blender aud API does not expose Factory.loop().")
     else:
         print(f"{log_prefix} loop {'disabled for test' if for_test else 'disabled'}")
 
@@ -252,7 +248,7 @@ def start_bgm(rt, context, *, for_test=False, log_prefix="[Tetris Mode][BGM]"):
         return _bgm_fail(f"aud.Device() failed. Check Blender audio device/preferences. Error: {exc}", filepath, log_prefix)
 
     try:
-        handle = device.play(factory)
+        handle = device.play(sound)
         print(f"{log_prefix} playback started")
     except Exception as exc:
         return _bgm_fail(f"device.play() failed: {exc}", filepath, log_prefix)
@@ -271,7 +267,7 @@ def start_bgm(rt, context, *, for_test=False, log_prefix="[Tetris Mode][BGM]"):
         print(f"{log_prefix} handle status unavailable: {exc}")
 
     rt.bgm_device = device
-    rt.bgm_factory = factory
+    rt.bgm_sound = sound
     rt.bgm_handle = handle
     rt.bgm_filepath = filepath
     message = f"BGM started: {filepath}"
@@ -288,7 +284,7 @@ def stop_bgm(rt):
         except Exception as exc:
             print(f"[Tetris Mode][BGM] stop failed: {exc}")
     rt.bgm_handle = None
-    rt.bgm_factory = None
+    rt.bgm_sound = None
     rt.bgm_device = None
     rt.bgm_filepath = None
 
