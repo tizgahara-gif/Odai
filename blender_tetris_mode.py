@@ -46,6 +46,8 @@ MIN_FALL_INTERVAL = 0.08
 DROP_INPUT_LOCK_SECONDS = 0.5
 SPAWN_X = BOARD_WIDTH // 2 - 2
 LINE_CLEAR_BASE_SCORES = {0: 0, 1: 100, 2: 300, 3: 500, 4: 800}
+LINE_CLEAR_FLASH_DURATION = 0.18
+LINE_CLEAR_FLASH_COLOR = (1.0, 1.0, 1.0, 1.0)
 RANDOM_MINO_GRID_SIZE = 4
 RANDOM_MINO_MIN_CELL_COUNT = 5
 RANDOM_MINO_MAX_CELL_COUNT = 8
@@ -153,6 +155,10 @@ class TetrisGameState:
     piece_spawn_time: float = 0.0
     start_time: float = 0.0
     last_fall_time: float = 0.0
+    line_clear_pending: bool = False
+    line_clear_rows: list = field(default_factory=list)
+    line_clear_started_at: float = 0.0
+    line_clear_piece_locked: bool = False
     game_over: bool = False
 
 
@@ -1213,7 +1219,7 @@ def current_fall_interval(rt):
 
 
 def on_timer(rt, context):
-    if rt.game is None or rt.game.game_over:
+    if rt.game is None or rt.game.game_over or rt.game.line_clear_pending:
         return
     now = time.monotonic()
     if now - rt.game.last_fall_time >= current_fall_interval(rt):
@@ -1225,7 +1231,7 @@ def on_timer(rt, context):
 
 def lock_current_piece(rt):
     piece = rt.game.current_piece
-    if piece is None or rt.game.game_over:
+    if piece is None or rt.game.game_over or rt.game.line_clear_pending:
         return
     cells = piece_cells(piece)
     # If a piece locks while any occupied cell is still above the visible board,
@@ -1247,25 +1253,58 @@ def lock_current_piece(rt):
             except ReferenceError:
                 pass
     rt.active_objects.clear()
-    cleared = clear_lines(rt)
-    if cleared > 0:
-        rt.game.total_lines_cleared += cleared
-        rt.game.level = calculate_level(rt.game.total_lines_cleared)
-        rt.game.fall_interval = calculate_fall_interval(rt.game.level)
-        base_score = LINE_CLEAR_BASE_SCORES.get(cleared, 0)
-        multiplier = calculate_score_multiplier(rt.game.level)
-        rt.game.score += int(base_score * multiplier)
+    full_rows = find_full_rows(rt)
+    if full_rows:
+        start_line_clear_flash(rt, full_rows)
+        return
     spawn_next_as_current(rt)
     if not rt.game.game_over:
         create_active_piece_objects(rt)
         update_active_piece_objects(rt)
 
 
-def clear_lines(rt):
-    full_rows = [y for y in range(BOARD_HEIGHT) if all(rt.game.board[y][x] is not None for x in range(BOARD_WIDTH))]
-    if not full_rows:
+def find_full_rows(rt):
+    return [y for y in range(BOARD_HEIGHT) if all(rt.game.board[y][x] is not None for x in range(BOARD_WIDTH))]
+
+
+def start_line_clear_flash(rt, rows):
+    rt.game.line_clear_pending = True
+    rt.game.line_clear_rows = list(rows)
+    rt.game.line_clear_started_at = time.monotonic()
+    rt.game.line_clear_piece_locked = True
+    clear_ghost_objects(rt)
+    for y in rows:
+        for x in range(BOARD_WIDTH):
+            obj = rt.fixed_objects.get((x, y))
+            if obj is not None:
+                try:
+                    obj.color = LINE_CLEAR_FLASH_COLOR
+                except Exception:
+                    pass
+
+
+def update_line_clear_flash(rt):
+    if rt.game is None or not rt.game.line_clear_pending:
+        return
+    if time.monotonic() - rt.game.line_clear_started_at < LINE_CLEAR_FLASH_DURATION:
+        return
+    rows = list(rt.game.line_clear_rows)
+    rt.game.line_clear_pending = False
+    rt.game.line_clear_rows.clear()
+    rt.game.line_clear_started_at = 0.0
+    rt.game.line_clear_piece_locked = False
+    apply_line_clear(rt, rows)
+    spawn_next_as_current(rt)
+    if not rt.game.game_over:
+        create_active_piece_objects(rt)
+        update_active_piece_objects(rt)
+
+
+def apply_line_clear(rt, rows):
+    rows = sorted(set(rows))
+    if not rows:
         return 0
-    for y in full_rows:
+    for y in rows:
         for x in range(BOARD_WIDTH):
             obj = rt.fixed_objects.pop((x, y), None)
             if obj is not None:
@@ -1279,7 +1318,7 @@ def clear_lines(rt):
     new_objects = {}
     write_y = 0
     for read_y in range(BOARD_HEIGHT):
-        if read_y in full_rows:
+        if read_y in rows:
             continue
         for x in range(BOARD_WIDTH):
             kind = old_board[read_y][x]
@@ -1293,7 +1332,19 @@ def clear_lines(rt):
         write_y += 1
     rt.game.board = new_board
     rt.fixed_objects = new_objects
-    return len(full_rows)
+
+    cleared = len(rows)
+    rt.game.total_lines_cleared += cleared
+    rt.game.level = calculate_level(rt.game.total_lines_cleared)
+    rt.game.fall_interval = calculate_fall_interval(rt.game.level)
+    base_score = LINE_CLEAR_BASE_SCORES.get(cleared, 0)
+    multiplier = calculate_score_multiplier(rt.game.level)
+    rt.game.score += int(base_score * multiplier)
+    return cleared
+
+
+def clear_lines(rt):
+    return apply_line_clear(rt, find_full_rows(rt))
 
 
 def set_game_over(rt):
@@ -1740,6 +1791,12 @@ class OBJECT_OT_tetris_mode_start(bpy.types.Operator):
                     return {"FINISHED"}
                 if event.type == "TIMER":
                     update_bgm_loop(rt)
+                    tag_redraw_all(context)
+                return {"RUNNING_MODAL"}
+            if rt.game.line_clear_pending:
+                if event.type == "TIMER":
+                    update_bgm_loop(rt)
+                    update_line_clear_flash(rt)
                     tag_redraw_all(context)
                 return {"RUNNING_MODAL"}
             if event.type == "TIMER":
