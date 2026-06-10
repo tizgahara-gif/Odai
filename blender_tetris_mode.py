@@ -20,6 +20,7 @@ import blf
 import gpu
 from gpu_extras.batch import batch_for_shader
 from mathutils import Vector
+from bpy_extras.view3d_utils import location_3d_to_region_2d
 
 
 BOARD_WIDTH = 10
@@ -176,10 +177,11 @@ class OBJECT_OT_tetris_mode_start(bpy.types.Operator):
     bl_idname = "object.tetris_mode_start"
     bl_label = "Start Tetris Mode"
     bl_description = "Start a modal Tetris mini-game centered on the active mesh object"
+    bl_options = set()
 
     _running_instance = None
 
-    def __init__(self):
+    def __init__(self, *args, **kwargs):
         self._timer = None
         self._draw_handle = None
         self._viewport_states = []
@@ -598,13 +600,6 @@ class OBJECT_OT_tetris_mode_start(bpy.types.Operator):
     def _set_game_over(self):
         self._game.game_over = True
         self._delete_active_piece_objects()
-        for obj in list(self._fixed_objects.values()):
-            try:
-                obj.data.materials.clear()
-                obj.data.materials.append(self._gray_material)
-                obj.color = self._gray_material.diffuse_color
-            except Exception:
-                pass
 
     def _draw_overlay(self, context):
         region = context.region
@@ -626,7 +621,8 @@ class OBJECT_OT_tetris_mode_start(bpy.types.Operator):
         draw_text("HOLD", right_x, hold_y + 75, 15, (0.9, 0.9, 0.9, 1))
         self._draw_mini_piece(shader, self._game.hold_piece, right_x, hold_y)
         if self._game.game_over:
-            draw_rect(shader, 0, 0, width, height, (0.0, 0.0, 0.0, 0.28))
+            draw_rect(shader, 0, 0, width, height, (0.0, 0.0, 0.0, 0.18))
+            self._draw_board_gray_overlay(context, shader, width, height)
             draw_text("GAME OVER", width / 2, height / 2 + 22, 46, (1.0, 0.25, 0.2, 1.0), align="CENTER")
             draw_text(f"SCORE {self._game.score}", width / 2, height / 2 - 28, 26, (1.0, 1.0, 1.0, 1.0), align="CENTER")
             draw_text("Press Esc or Enter", width / 2, height / 2 - 62, 16, (0.9, 0.9, 0.9, 1.0), align="CENTER")
@@ -634,6 +630,41 @@ class OBJECT_OT_tetris_mode_start(bpy.types.Operator):
             gpu.state.blend_set("NONE")
         except Exception:
             pass
+
+
+    def _draw_board_gray_overlay(self, context, shader, region_width, region_height):
+        region = context.region
+        rv3d = getattr(context.space_data, "region_3d", None) if context.space_data else None
+        points = []
+        if region is not None and rv3d is not None:
+            board_corners = (
+                self._world_from_grid(-0.5, -0.5),
+                self._world_from_grid(BOARD_WIDTH - 0.5, -0.5),
+                self._world_from_grid(BOARD_WIDTH - 0.5, BOARD_HEIGHT - 0.5),
+                self._world_from_grid(-0.5, BOARD_HEIGHT - 0.5),
+            )
+            for corner in board_corners:
+                projected = location_3d_to_region_2d(region, rv3d, corner)
+                if projected is not None:
+                    points.append(projected)
+        if len(points) >= 2:
+            min_x = max(0, min(point.x for point in points) - 10)
+            max_x = min(region_width, max(point.x for point in points) + 10)
+            min_y = max(0, min(point.y for point in points) - 10)
+            max_y = min(region_height, max(point.y for point in points) + 10)
+            if max_x > min_x and max_y > min_y:
+                draw_rect(shader, min_x, min_y, max_x - min_x, max_y - min_y, (0.45, 0.45, 0.45, 0.58))
+                return
+        fallback_w = min(region_width * 0.55, 360)
+        fallback_h = min(region_height * 0.72, 560)
+        draw_rect(
+            shader,
+            (region_width - fallback_w) * 0.5,
+            (region_height - fallback_h) * 0.5,
+            fallback_w,
+            fallback_h,
+            (0.45, 0.45, 0.45, 0.58),
+        )
 
     def _draw_mini_piece(self, shader, kind, x, y):
         cell = 14
