@@ -27,6 +27,7 @@ from mathutils import Euler, Vector
 BOARD_WIDTH = 10
 BOARD_HEIGHT = 20
 CELL_SIZE = 1.0
+BOARD_VIEW_PADDING = 1.2
 TEMP_COLLECTION_NAME = "Tetris_Temporary_Collection"
 TEMP_PREFIX = "Tetris_"
 TIMER_INTERVAL = 0.03
@@ -374,7 +375,8 @@ def save_view_states(rt, context):
 def focus_viewports_on_board(rt, context):
     board_height_world = BOARD_HEIGHT * CELL_SIZE
     board_width_world = BOARD_WIDTH * CELL_SIZE
-    view_distance = max(board_height_world, board_width_world) * 1.05
+    base_view_distance = max(board_height_world, board_width_world) * 1.05
+    view_distance = base_view_distance * BOARD_VIEW_PADDING
     # Front-like view for an X-Z board: look along the Y axis so X is horizontal
     # and Z is vertical. This modifies only RegionView3D, never scene cameras.
     board_view_rotation = Euler((1.57079632679, 0.0, 0.0), "XYZ").to_quaternion()
