@@ -31,6 +31,12 @@ BOARD_VIEW_PADDING = 1.2
 BOARD_VIEW_EXTRA_PADDING = 1.1
 TEMP_COLLECTION_NAME = "Tetris_Temporary_Collection"
 TEMP_PREFIX = "Tetris_"
+GHOST_PREFIX = "Tetris_Ghost_"
+GHOST_MESH_NAME = "Tetris_Ghost_Cube_Mesh"
+GHOST_MATERIAL_NAME = "Tetris_Ghost_Material"
+GHOST_ALPHA = 0.25
+GHOST_SCALE = 0.92
+GHOST_COLOR = (1.0, 1.0, 1.0, GHOST_ALPHA)
 TIMER_INTERVAL = 0.03
 BASE_FALL_INTERVAL = 0.8
 LEVEL_SPEED_MULTIPLIER = 0.88
@@ -151,7 +157,10 @@ class TetrisRuntimeState:
     viewport_view_states: list = field(default_factory=list)
     temp_collection: object | None = None
     shared_cube_mesh: object | None = None
+    ghost_mesh: object | None = None
+    ghost_material: object | None = None
     active_objects: list = field(default_factory=list)
+    ghost_objects: list = field(default_factory=list)
     fixed_objects: dict = field(default_factory=dict)
     game: TetrisGameState | None = None
     origin: Vector = field(default_factory=lambda: Vector((0.0, 0.0, 0.0)))
@@ -631,16 +640,54 @@ def create_temp_collection(rt, context):
     context.scene.collection.children.link(rt.temp_collection)
 
 
-def create_shared_mesh(rt):
-    half = CELL_SIZE * 0.46
+def create_cube_mesh(name, scale=1.0):
+    half = CELL_SIZE * 0.46 * scale
     verts = [
         (-half, -half, -half), (half, -half, -half), (half, half, -half), (-half, half, -half),
         (-half, -half, half), (half, -half, half), (half, half, half), (-half, half, half),
     ]
     faces = [(0, 1, 2, 3), (4, 7, 6, 5), (0, 4, 5, 1), (1, 5, 6, 2), (2, 6, 7, 3), (3, 7, 4, 0)]
-    rt.shared_cube_mesh = bpy.data.meshes.new(f"{TEMP_PREFIX}Shared_Cube_Mesh")
-    rt.shared_cube_mesh.from_pydata(verts, [], faces)
-    rt.shared_cube_mesh.update()
+    mesh = bpy.data.meshes.new(name)
+    mesh.from_pydata(verts, [], faces)
+    mesh.update()
+    return mesh
+
+
+def create_shared_mesh(rt):
+    rt.shared_cube_mesh = create_cube_mesh(f"{TEMP_PREFIX}Shared_Cube_Mesh")
+
+
+def get_or_create_ghost_material(rt):
+    if rt.ghost_material is not None:
+        return rt.ghost_material
+    mat = bpy.data.materials.new(GHOST_MATERIAL_NAME)
+    mat.diffuse_color = GHOST_COLOR
+    try:
+        mat.use_nodes = True
+        bsdf = mat.node_tree.nodes.get("Principled BSDF")
+        if bsdf is not None and "Alpha" in bsdf.inputs:
+            bsdf.inputs["Alpha"].default_value = GHOST_ALPHA
+    except Exception:
+        pass
+    try:
+        mat.blend_method = "BLEND"
+        mat.show_transparent_back = True
+    except Exception:
+        pass
+    rt.ghost_material = mat
+    return mat
+
+
+def get_or_create_ghost_mesh(rt):
+    if rt.ghost_mesh is not None:
+        return rt.ghost_mesh
+    rt.ghost_mesh = create_cube_mesh(GHOST_MESH_NAME, GHOST_SCALE)
+    mat = get_or_create_ghost_material(rt)
+    try:
+        rt.ghost_mesh.materials.append(mat)
+    except Exception:
+        pass
+    return rt.ghost_mesh
 
 
 def save_viewports(rt, context):
@@ -930,6 +977,55 @@ def delete_active_piece_objects(rt):
     rt.active_objects.clear()
 
 
+def ensure_ghost_object_count(rt, count):
+    if rt.temp_collection is None:
+        return
+    mesh = get_or_create_ghost_mesh(rt)
+    while len(rt.ghost_objects) < count:
+        index = len(rt.ghost_objects)
+        obj = bpy.data.objects.new(f"{GHOST_PREFIX}{index}", mesh)
+        obj.show_name = False
+        obj.hide_render = True
+        obj.color = GHOST_COLOR
+        try:
+            obj.display_type = "TEXTURED"
+        except Exception:
+            pass
+        rt.temp_collection.objects.link(obj)
+        rt.ghost_objects.append(obj)
+    while len(rt.ghost_objects) > count:
+        obj = rt.ghost_objects.pop()
+        try:
+            bpy.data.objects.remove(obj, do_unlink=True)
+        except ReferenceError:
+            pass
+
+
+def clear_ghost_objects(rt):
+    for obj in list(getattr(rt, "ghost_objects", [])):
+        try:
+            bpy.data.objects.remove(obj, do_unlink=True)
+        except ReferenceError:
+            pass
+        except Exception:
+            pass
+    rt.ghost_objects.clear()
+
+
+def copy_piece_state(piece):
+    if piece is None:
+        return None
+    return PieceState(
+        kind=piece.kind,
+        x=piece.x,
+        y=piece.y,
+        rotation=piece.rotation,
+        custom_cells=list(piece.custom_cells) if piece.custom_cells is not None else None,
+        color=piece.color,
+        cell_count=getattr(piece, "cell_count", 4),
+    )
+
+
 def piece_local_cells(piece):
     if piece.custom_cells is not None:
         return rotate_custom_cells(piece.custom_cells, piece.rotation)
@@ -963,6 +1059,48 @@ def collides(rt, piece):
     return False
 
 
+def calculate_ghost_piece(rt, piece):
+    if piece is None or rt.game is None or rt.game.game_over:
+        return None
+    ghost = copy_piece_state(piece)
+    while True:
+        test_piece = copy_piece_state(ghost)
+        test_piece.y -= 1
+        if collides(rt, test_piece):
+            break
+        ghost.y -= 1
+    return ghost
+
+
+def get_ghost_color_for_piece(piece):
+    base = get_piece_color(piece)
+    return (base[0], base[1], base[2], GHOST_ALPHA)
+
+
+def update_ghost_objects(rt):
+    if rt.game is None or rt.game.game_over or rt.game.current_piece is None:
+        clear_ghost_objects(rt)
+        return
+    ghost_piece = calculate_ghost_piece(rt, rt.game.current_piece)
+    if ghost_piece is None:
+        clear_ghost_objects(rt)
+        return
+    cells = piece_cells(ghost_piece)
+    ensure_ghost_object_count(rt, len(cells))
+    color = get_ghost_color_for_piece(rt.game.current_piece)
+    for obj, (x, y) in zip(rt.ghost_objects, cells):
+        obj.location = world_from_grid(rt, x, y)
+        obj.hide_render = True
+        obj.hide_viewport = False
+        obj.color = color
+        obj.name = f"{GHOST_PREFIX}{ghost_piece.kind}_{x}_{y}"
+    for obj in rt.ghost_objects[len(cells):]:
+        try:
+            obj.hide_viewport = True
+        except Exception:
+            pass
+
+
 def update_active_piece_objects(rt):
     piece = rt.game.current_piece
     if piece is None:
@@ -975,6 +1113,7 @@ def update_active_piece_objects(rt):
         obj.hide_render = True
         obj.name = f"{TEMP_PREFIX}Active_{piece.kind}_{x}_{y}"
         apply_piece_color(obj, piece)
+    update_ghost_objects(rt)
 
 
 def is_drop_input_locked(rt):
@@ -1037,9 +1176,15 @@ def try_rotate(rt, direction):
 
 
 def hard_drop(rt):
-    dropped = 0
-    while try_move(rt, 0, -1):
-        dropped += 1
+    piece = rt.game.current_piece
+    if piece is None:
+        return
+    ghost = calculate_ghost_piece(rt, piece)
+    if ghost is None:
+        return
+    dropped = max(0, piece.y - ghost.y)
+    rt.game.current_piece = ghost
+    update_active_piece_objects(rt)
     rt.game.score += dropped * 2
     lock_current_piece(rt)
 
@@ -1135,6 +1280,7 @@ def clear_lines(rt):
 def set_game_over(rt):
     rt.game.game_over = True
     delete_active_piece_objects(rt)
+    clear_ghost_objects(rt)
 
 
 def get_draw_context():
@@ -1424,12 +1570,16 @@ def cleanup_runtime(context):
     restore_viewports(rt)
     restore_view_states(rt)
     restore_non_tetris_scene_objects(rt)
+    clear_ghost_objects(rt)
     remove_temp_data(rt)
     restore_object_mode_and_active(rt, context)
     rt.active_objects.clear()
+    rt.ghost_objects.clear()
     rt.fixed_objects.clear()
     rt.scene_visibility_states.clear()
     rt.shared_cube_mesh = None
+    rt.ghost_mesh = None
+    rt.ghost_material = None
     rt.temp_collection = None
     rt.game = None
     _TETRIS_RUNTIME = None
