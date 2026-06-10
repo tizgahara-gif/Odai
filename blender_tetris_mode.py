@@ -28,6 +28,7 @@ BOARD_WIDTH = 10
 BOARD_HEIGHT = 20
 CELL_SIZE = 1.0
 BOARD_VIEW_PADDING = 1.2
+BOARD_VIEW_EXTRA_PADDING = 1.1
 TEMP_COLLECTION_NAME = "Tetris_Temporary_Collection"
 TEMP_PREFIX = "Tetris_"
 TIMER_INTERVAL = 0.03
@@ -142,6 +143,11 @@ class TetrisRuntimeState:
 
 
 _TETRIS_RUNTIME: TetrisRuntimeState | None = None
+_BGM_TEST_DEVICE = None
+_BGM_TEST_FACTORY = None
+_BGM_TEST_HANDLE = None
+_BGM_TEST_FILEPATH = None
+_BGM_TEST_TOKEN = 0
 
 
 def get_runtime():
@@ -160,37 +166,95 @@ def get_addon_preferences(context):
     return addon.preferences
 
 
-def start_bgm(rt, context):
+def play_bgm_from_preferences(context, log_prefix="[Tetris Mode][BGM]", force_duration_label=None):
+    print(f"{log_prefix} resolving preferences")
     prefs = get_addon_preferences(context)
-    if prefs is None or not getattr(prefs, "bgm_enabled", True):
-        return
-    filepath = bpy.path.abspath(getattr(prefs, "bgm_filepath", ""))
+    if prefs is None:
+        print(f"{log_prefix} preferences not found")
+        return None, None, None, None
+    print(f"{log_prefix} prefs found")
+    enabled = bool(getattr(prefs, "bgm_enabled", True))
+    print(f"{log_prefix} enabled: {enabled}")
+    if not enabled:
+        return None, None, None, None
+
+    raw_filepath = getattr(prefs, "bgm_filepath", "")
+    print(f"{log_prefix} raw filepath: {raw_filepath}")
+    filepath = bpy.path.abspath(raw_filepath) if raw_filepath else ""
+    print(f"{log_prefix} absolute filepath: {filepath}")
     if not filepath:
-        return
-    if not os.path.isfile(filepath):
-        print(f"[Tetris Mode] BGM file not found: {filepath}")
-        return
+        print(f"{log_prefix} no BGM file configured")
+        return None, None, None, None
+
+    exists = os.path.isfile(filepath)
+    print(f"{log_prefix} file exists: {exists}")
+    if not exists:
+        print(f"{log_prefix} BGM file not found: {filepath}")
+        return None, None, None, None
+
     try:
         import aud
+        print(f"{log_prefix} aud import ok")
+    except Exception as exc:
+        print(f"{log_prefix} aud import failed: {exc}")
+        return None, None, None, None
+
+    try:
         factory = aud.Factory.file(filepath)
-        if getattr(prefs, "bgm_loop", True):
-            try:
-                factory = factory.loop(-1)
-            except Exception as exc:
-                print(f"[Tetris Mode] BGM loop unavailable, playing once: {exc}")
-        device = aud.Device()
-        handle = device.play(factory)
+        print(f"{log_prefix} factory created")
+    except Exception as exc:
+        print(f"{log_prefix} factory creation failed: {exc}")
+        return None, None, None, None
+
+    if getattr(prefs, "bgm_loop", True):
         try:
-            handle.volume = float(getattr(prefs, "bgm_volume", 0.35))
-        except Exception:
-            pass
+            factory = factory.loop(-1)
+            print(f"{log_prefix} loop applied")
+        except Exception as exc:
+            print(f"{log_prefix} loop unavailable, playing once: {exc}")
+    else:
+        print(f"{log_prefix} loop disabled")
+
+    try:
+        device = aud.Device()
+        print(f"{log_prefix} device created")
+    except Exception as exc:
+        print(f"{log_prefix} device creation failed: {exc}")
+        return None, None, None, None
+
+    try:
+        handle = device.play(factory)
+        print(f"{log_prefix} playback started")
+    except Exception as exc:
+        print(f"{log_prefix} device.play failed: {exc}")
+        return device, factory, None, filepath
+
+    volume = float(getattr(prefs, "bgm_volume", 0.35))
+    print(f"{log_prefix} volume: {volume}")
+    try:
+        handle.volume = volume
+        print(f"{log_prefix} volume applied")
+    except Exception as exc:
+        print(f"{log_prefix} volume apply failed: {exc}")
+
+    try:
+        print(f"{log_prefix} handle status: {handle.status}")
+    except Exception as exc:
+        print(f"{log_prefix} handle status unavailable: {exc}")
+
+    print(f"{log_prefix} handle retained{f' ({force_duration_label})' if force_duration_label else ''}: {filepath}")
+    return device, factory, handle, filepath
+
+
+def start_bgm(rt, context):
+    try:
+        device, factory, handle, filepath = play_bgm_from_preferences(context, "[Tetris Mode][BGM]")
         rt.bgm_device = device
         rt.bgm_factory = factory
         rt.bgm_handle = handle
         rt.bgm_filepath = filepath
-        print(f"[Tetris Mode] BGM started: {filepath}")
     except Exception as exc:
-        print(f"[Tetris Mode] Failed to play BGM: {exc}")
+        print(f"[Tetris Mode][BGM] Failed to play BGM: {exc}")
         rt.bgm_device = None
         rt.bgm_factory = None
         rt.bgm_handle = None
@@ -202,12 +266,50 @@ def stop_bgm(rt):
     if handle is not None:
         try:
             handle.stop()
-        except Exception:
-            pass
+            print("[Tetris Mode][BGM] stopped")
+        except Exception as exc:
+            print(f"[Tetris Mode][BGM] stop failed: {exc}")
     rt.bgm_handle = None
     rt.bgm_factory = None
     rt.bgm_device = None
     rt.bgm_filepath = None
+
+
+def stop_test_bgm():
+    global _BGM_TEST_DEVICE, _BGM_TEST_FACTORY, _BGM_TEST_HANDLE, _BGM_TEST_FILEPATH
+    if _BGM_TEST_HANDLE is not None:
+        try:
+            _BGM_TEST_HANDLE.stop()
+            print("[Tetris Mode][BGM Test] stopped")
+        except Exception as exc:
+            print(f"[Tetris Mode][BGM Test] stop failed: {exc}")
+    _BGM_TEST_HANDLE = None
+    _BGM_TEST_FACTORY = None
+    _BGM_TEST_DEVICE = None
+    _BGM_TEST_FILEPATH = None
+
+
+def start_test_bgm(context):
+    global _BGM_TEST_DEVICE, _BGM_TEST_FACTORY, _BGM_TEST_HANDLE, _BGM_TEST_FILEPATH, _BGM_TEST_TOKEN
+    stop_test_bgm()
+    _BGM_TEST_TOKEN += 1
+    token = _BGM_TEST_TOKEN
+    device, factory, handle, filepath = play_bgm_from_preferences(context, "[Tetris Mode][BGM Test]", "auto-stop in 5s")
+    _BGM_TEST_DEVICE = device
+    _BGM_TEST_FACTORY = factory
+    _BGM_TEST_HANDLE = handle
+    _BGM_TEST_FILEPATH = filepath
+    if handle is not None:
+        def auto_stop():
+            if token == _BGM_TEST_TOKEN:
+                stop_test_bgm()
+            return None
+        try:
+            bpy.app.timers.register(auto_stop, first_interval=5.0)
+        except Exception as exc:
+            print(f"[Tetris Mode][BGM Test] auto-stop timer failed: {exc}")
+    return handle is not None
+
 
 
 def make_bag():
@@ -377,7 +479,7 @@ def focus_viewports_on_board(rt, context):
     board_height_world = BOARD_HEIGHT * CELL_SIZE
     board_width_world = BOARD_WIDTH * CELL_SIZE
     base_view_distance = max(board_height_world, board_width_world) * 1.05
-    view_distance = base_view_distance * BOARD_VIEW_PADDING
+    view_distance = base_view_distance * BOARD_VIEW_PADDING * BOARD_VIEW_EXTRA_PADDING
     # Front-like view for an X-Z board: look along the Y axis so X is horizontal
     # and Z is vertical. This modifies only RegionView3D, never scene cameras.
     board_view_rotation = Euler((1.57079632679, 0.0, 0.0), "XYZ").to_quaternion()
@@ -709,12 +811,11 @@ def draw_overlay():
         width = region.width
         height = region.height
         draw_board_grid_overlay(rt, region, rv3d, shader, outline_only=False)
-        right_x = max(20, width - 175)
-        top_y = max(180, height - 45)
-        draw_text(f"SCORE {rt.game.score}", right_x, top_y, 20, (1, 1, 1, 1))
-        next_x, next_y = get_next_preview_origin(rt, region, rv3d, width, height)
-        draw_text("NEXT", next_x, next_y + 78, 15, (0.9, 0.9, 0.9, 1))
-        draw_mini_piece(shader, rt.game.next_piece, next_x, next_y)
+        if not rt.game.game_over:
+            next_x, next_y = get_next_preview_origin(rt, region, rv3d, width, height)
+            draw_text(f"SCORE {rt.game.score}", next_x, next_y + 108, 20, (1, 1, 1, 1))
+            draw_text("NEXT", next_x, next_y + 78, 15, (0.9, 0.9, 0.9, 1))
+            draw_mini_piece(shader, rt.game.next_piece, next_x, next_y)
         if rt.game.game_over:
             draw_rect(shader, 0, 0, width, height, (0.0, 0.0, 0.0, 0.18))
             # 2D overlay projection uses the current draw context and falls back
@@ -758,6 +859,7 @@ def get_next_preview_origin(rt, region, rv3d, width, height):
     gap = 2
     preview_w = cell * 4 + gap * 3 + 12
     preview_h = cell * 4 + gap * 3 + 12
+    ui_total_h = preview_h + 110
     board_rect = get_board_rect_2d(rt, region, rv3d)
     if board_rect is not None:
         _min_x, max_x, min_y, max_y = board_rect
@@ -767,7 +869,7 @@ def get_next_preview_origin(rt, region, rv3d, width, height):
         x = width - 175
         y = height * 0.5 - preview_h * 0.5
     x = max(20, min(x, width - preview_w - 20))
-    y = max(20, min(y, height - preview_h - 20))
+    y = max(20, min(y, height - ui_total_h - 20))
     return x, y
 
 
@@ -981,6 +1083,21 @@ def cleanup_runtime(context):
     tag_redraw_all(context)
 
 
+class TETRIS_MODE_OT_test_bgm(bpy.types.Operator):
+    bl_idname = "tetris_mode.test_bgm"
+    bl_label = "Test BGM"
+    bl_description = "Play the configured Tetris Mode BGM for five seconds for diagnostics"
+    bl_options = set()
+
+    def execute(self, context):
+        ok = start_test_bgm(context)
+        if ok:
+            self.report({"INFO"}, "Testing BGM for 5 seconds. See System Console for diagnostics.")
+        else:
+            self.report({"WARNING"}, "BGM test did not start. See System Console for diagnostics.")
+        return {"FINISHED"}
+
+
 class TetrisModeAddonPreferences(bpy.types.AddonPreferences):
     bl_idname = __name__
 
@@ -1011,6 +1128,8 @@ class TetrisModeAddonPreferences(bpy.types.AddonPreferences):
         layout.prop(self, "bgm_filepath")
         layout.prop(self, "bgm_volume")
         layout.prop(self, "bgm_loop")
+        layout.label(text="If MP3 does not play, test WAV or OGG. Playback depends on Blender/aud codec support.")
+        layout.operator("tetris_mode.test_bgm", text="Test BGM", icon="PLAY")
 
 
 class OBJECT_OT_tetris_mode_start(bpy.types.Operator):
@@ -1135,6 +1254,7 @@ class VIEW3D_PT_tetris_mode_panel(bpy.types.Panel):
 
 
 classes = (
+    TETRIS_MODE_OT_test_bgm,
     TetrisModeAddonPreferences,
     OBJECT_OT_tetris_mode_start,
     VIEW3D_PT_tetris_mode_panel,
@@ -1148,6 +1268,7 @@ def register():
 
 def unregister():
     cleanup_runtime(bpy.context)
+    stop_test_bgm()
     safe_remove_collection_by_name(TEMP_COLLECTION_NAME)
     purge_tetris_orphans()
     for cls in reversed(classes):
