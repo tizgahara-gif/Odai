@@ -133,8 +133,7 @@ class TetrisRuntimeState:
     game: TetrisGameState | None = None
     origin: Vector = field(default_factory=lambda: Vector((0.0, 0.0, 0.0)))
     active_object_name: str | None = None
-    source_object_name: str | None = None
-    source_object_hidden: bool | None = None
+    scene_visibility_states: list = field(default_factory=list)
     bgm_device: object | None = None
     bgm_sound: object | None = None
     bgm_handle: object | None = None
@@ -566,27 +565,75 @@ def apply_piece_color(obj, kind):
     obj.color = PIECE_COLORS.get(kind, (1.0, 1.0, 1.0, 1.0))
 
 
-def hide_source_object_for_game(rt, obj):
-    rt.source_object_name = obj.name
-    # Hide source object instead of modifying its material transparency, Object.color,
-    # hide_viewport, or hide_render. Restore the original per-view-layer hidden state
-    # during cleanup.
+def _hide_get_for_view_layer(obj, view_layer):
     try:
-        rt.source_object_hidden = obj.hide_get()
-        obj.hide_set(True)
-    except Exception:
-        rt.source_object_hidden = None
+        return obj.hide_get(view_layer=view_layer)
+    except TypeError:
+        return obj.hide_get()
 
 
-def restore_source_object_visibility(rt):
-    if not rt.source_object_name or rt.source_object_hidden is None:
-        return
-    obj = bpy.data.objects.get(rt.source_object_name)
-    if obj is not None:
+def _hide_set_for_view_layer(obj, hidden, view_layer):
+    try:
+        obj.hide_set(hidden, view_layer=view_layer)
+    except TypeError:
+        obj.hide_set(hidden)
+
+
+def hide_non_tetris_scene_objects(rt, context):
+    view_layer = getattr(context, "view_layer", None)
+    rt.scene_visibility_states.clear()
+    temp_names = set()
+    if rt.temp_collection is not None:
         try:
-            obj.hide_set(rt.source_object_hidden)
+            temp_names = {obj.name for obj in rt.temp_collection.objects}
+        except Exception:
+            temp_names = set()
+
+    for obj in list(getattr(context.scene, "objects", [])):
+        if obj is None:
+            continue
+        if obj.name.startswith(TEMP_PREFIX) or obj.name in temp_names:
+            continue
+        try:
+            hidden = _hide_get_for_view_layer(obj, view_layer)
+        except Exception:
+            hidden = None
+        rt.scene_visibility_states.append({
+            "object": obj,
+            "name": obj.name,
+            "view_layer": view_layer,
+            "hidden": hidden,
+        })
+        try:
+            _hide_set_for_view_layer(obj, True, view_layer)
         except Exception:
             pass
+
+
+def restore_non_tetris_scene_objects(rt):
+    for state in getattr(rt, "scene_visibility_states", []):
+        obj = state.get("object")
+        name = state.get("name")
+        hidden = state.get("hidden")
+        view_layer = state.get("view_layer")
+        if hidden is None:
+            continue
+        try:
+            if obj is not None:
+                _hide_set_for_view_layer(obj, hidden, view_layer)
+                continue
+        except ReferenceError:
+            pass
+        except Exception:
+            pass
+        if name:
+            found = bpy.data.objects.get(name)
+            if found is not None:
+                try:
+                    _hide_set_for_view_layer(found, hidden, view_layer)
+                except Exception:
+                    pass
+    rt.scene_visibility_states.clear()
 
 
 def create_active_piece_objects(rt):
@@ -1088,11 +1135,12 @@ def cleanup_runtime(context):
     stop_bgm(rt)
     restore_viewports(rt)
     restore_view_states(rt)
-    restore_source_object_visibility(rt)
+    restore_non_tetris_scene_objects(rt)
     remove_temp_data(rt)
     restore_object_mode_and_active(rt, context)
     rt.active_objects.clear()
     rt.fixed_objects.clear()
+    rt.scene_visibility_states.clear()
     rt.shared_cube_mesh = None
     rt.temp_collection = None
     rt.game = None
@@ -1189,14 +1237,13 @@ class OBJECT_OT_tetris_mode_start(bpy.types.Operator):
         _TETRIS_RUNTIME = TetrisRuntimeState(
             origin=source_obj.location.copy(),
             active_object_name=source_obj.name,
-            source_object_name=source_obj.name,
         )
         rt = _TETRIS_RUNTIME
         try:
-            hide_source_object_for_game(rt, source_obj)
             safe_remove_collection_by_name(TEMP_COLLECTION_NAME)
             purge_tetris_orphans()
             create_temp_collection(rt, context)
+            hide_non_tetris_scene_objects(rt, context)
             create_shared_mesh(rt)
             save_viewports(rt, context)
             save_view_states(rt, context)
