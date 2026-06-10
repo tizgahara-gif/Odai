@@ -32,13 +32,14 @@ BOARD_VIEW_EXTRA_PADDING = 1.1
 TEMP_COLLECTION_NAME = "Tetris_Temporary_Collection"
 TEMP_PREFIX = "Tetris_"
 TIMER_INTERVAL = 0.03
-INITIAL_FALL_INTERVAL = 0.8
-SPEEDUP_SECONDS = 30.0
-SPEEDUP_FACTOR = 0.9
+BASE_FALL_INTERVAL = 0.8
+LEVEL_SPEED_MULTIPLIER = 0.88
+LEVEL_SCORE_BONUS = 0.2
+LINES_PER_LEVEL = 10
 MIN_FALL_INTERVAL = 0.08
 DROP_INPUT_LOCK_SECONDS = 0.5
 SPAWN_X = BOARD_WIDTH // 2 - 2
-SCORE_LINE_CLEAR = {0: 0, 1: 100, 2: 300, 3: 500, 4: 800}
+LINE_CLEAR_BASE_SCORES = {0: 0, 1: 100, 2: 300, 3: 500, 4: 800}
 
 PIECE_KINDS = ("I", "O", "T", "S", "Z", "J", "L")
 PIECE_COLORS = {
@@ -114,6 +115,9 @@ class TetrisGameState:
     next_piece: str | None = None
     bag: list = field(default_factory=list)
     score: int = 0
+    level: int = 1
+    total_lines_cleared: int = 0
+    fall_interval: float = BASE_FALL_INTERVAL
     piece_spawn_time: float = 0.0
     start_time: float = 0.0
     last_fall_time: float = 0.0
@@ -447,6 +451,18 @@ def draw_text(text, x, y, size=16, color=(1.0, 1.0, 1.0, 1.0), align="LEFT"):
     return width, height
 
 
+def calculate_level(total_lines_cleared):
+    return max(1, total_lines_cleared // LINES_PER_LEVEL + 1)
+
+
+def calculate_fall_interval(level):
+    return max(MIN_FALL_INTERVAL, BASE_FALL_INTERVAL * (LEVEL_SPEED_MULTIPLIER ** (max(1, level) - 1)))
+
+
+def calculate_score_multiplier(level):
+    return 1.0 + (max(1, level) - 1) * LEVEL_SCORE_BONUS
+
+
 def draw_rect(shader, x, y, w, h, color):
     vertices = ((x, y), (x + w, y), (x + w, y + h), (x, y + h))
     batch = batch_for_shader(shader, "TRI_FAN", {"pos": vertices})
@@ -632,6 +648,8 @@ def restore_view_states(rt):
 def init_game_state(rt):
     now = time.monotonic()
     rt.game = TetrisGameState(start_time=now, last_fall_time=now)
+    rt.game.level = calculate_level(rt.game.total_lines_cleared)
+    rt.game.fall_interval = calculate_fall_interval(rt.game.level)
     rt.game.bag = make_bag()
     rt.game.next_piece = draw_from_bag(rt)
 
@@ -865,9 +883,7 @@ def hard_drop(rt):
 
 
 def current_fall_interval(rt):
-    elapsed = time.monotonic() - rt.game.start_time
-    steps = int(elapsed // SPEEDUP_SECONDS)
-    return max(MIN_FALL_INTERVAL, INITIAL_FALL_INTERVAL * (SPEEDUP_FACTOR ** steps))
+    return max(MIN_FALL_INTERVAL, getattr(rt.game, "fall_interval", BASE_FALL_INTERVAL))
 
 
 def on_timer(rt, context):
@@ -906,7 +922,13 @@ def lock_current_piece(rt):
                 pass
     rt.active_objects.clear()
     cleared = clear_lines(rt)
-    rt.game.score += SCORE_LINE_CLEAR.get(cleared, 0)
+    if cleared > 0:
+        rt.game.total_lines_cleared += cleared
+        rt.game.level = calculate_level(rt.game.total_lines_cleared)
+        rt.game.fall_interval = calculate_fall_interval(rt.game.level)
+        base_score = LINE_CLEAR_BASE_SCORES.get(cleared, 0)
+        multiplier = calculate_score_multiplier(rt.game.level)
+        rt.game.score += int(base_score * multiplier)
     spawn_next_as_current(rt)
     if not rt.game.game_over:
         create_active_piece_objects(rt)
@@ -976,7 +998,8 @@ def draw_overlay():
         draw_board_grid_overlay(rt, region, rv3d, shader, outline_only=False)
         if not rt.game.game_over:
             next_x, next_y = get_next_preview_origin(rt, region, rv3d, width, height)
-            draw_text(f"SCORE {rt.game.score}", next_x, next_y + 108, 20, (1, 1, 1, 1))
+            draw_text(f"LEVEL {rt.game.level}", next_x, next_y + 132, 18, (1, 1, 1, 1))
+            draw_text(f"SCORE {rt.game.score}", next_x, next_y + 108, 18, (1, 1, 1, 1))
             draw_text("NEXT", next_x, next_y + 78, 15, (0.9, 0.9, 0.9, 1))
             draw_mini_piece(shader, rt.game.next_piece, next_x, next_y)
         if rt.game.game_over:
@@ -989,7 +1012,8 @@ def draw_overlay():
             cx, cy = get_board_center_2d(rt, region, rv3d, width, height)
             draw_text("GAME OVER", cx, cy + 22, 46, (1.0, 0.25, 0.2, 1.0), align="CENTER")
             draw_text(f"SCORE {rt.game.score}", cx, cy - 28, 26, (1.0, 1.0, 1.0, 1.0), align="CENTER")
-            draw_text("Press Esc or Enter", cx, cy - 62, 16, (0.9, 0.9, 0.9, 1.0), align="CENTER")
+            draw_text(f"LEVEL {rt.game.level}", cx, cy - 58, 20, (1.0, 1.0, 1.0, 1.0), align="CENTER")
+            draw_text("Press Esc or Enter", cx, cy - 88, 16, (0.9, 0.9, 0.9, 1.0), align="CENTER")
     except Exception:
         # Draw handlers should never stop the modal operator because a viewport
         # context changed while Blender was redrawing.
@@ -1022,7 +1046,7 @@ def get_next_preview_origin(rt, region, rv3d, width, height):
     gap = 2
     preview_w = cell * 4 + gap * 3 + 12
     preview_h = cell * 4 + gap * 3 + 12
-    ui_total_h = preview_h + 110
+    ui_total_h = preview_h + 150
     board_rect = get_board_rect_2d(rt, region, rv3d)
     if board_rect is not None:
         _min_x, max_x, min_y, max_y = board_rect
