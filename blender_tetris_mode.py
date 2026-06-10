@@ -187,8 +187,6 @@ class OBJECT_OT_tetris_mode_start(bpy.types.Operator):
         self._viewport_states = []
         self._temp_collection = None
         self._shared_cube_mesh = None
-        self._materials = {}
-        self._gray_material = None
         self._active_objects = []
         self._fixed_objects = {}
         self._game = None
@@ -219,14 +217,15 @@ class OBJECT_OT_tetris_mode_start(bpy.types.Operator):
             safe_remove_collection_by_name(TEMP_COLLECTION_NAME)
             purge_tetris_orphans()
             self._create_temp_collection(context)
-            self._create_shared_mesh_and_materials()
+            self._create_shared_mesh()
             self._save_viewports(context)
             self._set_game_viewports(context)
             self._init_game_state()
             self._spawn_next_as_current()
-            self._create_active_piece_objects()
-            self._update_active_piece_objects()
-            self._draw_handle = bpy.types.SpaceView3D.draw_handler_add(self._draw_overlay, (context,), "WINDOW", "POST_PIXEL")
+            if not self._game.game_over:
+                self._create_active_piece_objects()
+                self._update_active_piece_objects()
+            self._draw_handle = bpy.types.SpaceView3D.draw_handler_add(self._draw_overlay, (), "WINDOW", "POST_PIXEL")
             self._timer = context.window_manager.event_timer_add(TIMER_INTERVAL, window=context.window)
             context.window_manager.modal_handler_add(self)
             self._tag_redraw_all(context)
@@ -290,8 +289,6 @@ class OBJECT_OT_tetris_mode_start(bpy.types.Operator):
         self._restore_object_mode_and_active(context)
         self._active_objects.clear()
         self._fixed_objects.clear()
-        self._materials.clear()
-        self._gray_material = None
         self._shared_cube_mesh = None
         self._temp_collection = None
         self._game = None
@@ -303,7 +300,7 @@ class OBJECT_OT_tetris_mode_start(bpy.types.Operator):
         self._temp_collection = bpy.data.collections.new(TEMP_COLLECTION_NAME)
         context.scene.collection.children.link(self._temp_collection)
 
-    def _create_shared_mesh_and_materials(self):
+    def _create_shared_mesh(self):
         half = CELL_SIZE * 0.46
         verts = [
             (-half, -half, -half), (half, -half, -half), (half, half, -half), (-half, half, -half),
@@ -313,12 +310,6 @@ class OBJECT_OT_tetris_mode_start(bpy.types.Operator):
         self._shared_cube_mesh = bpy.data.meshes.new(f"{TEMP_PREFIX}Shared_Cube_Mesh")
         self._shared_cube_mesh.from_pydata(verts, [], faces)
         self._shared_cube_mesh.update()
-        for kind, color in PIECE_COLORS.items():
-            mat = bpy.data.materials.new(f"{TEMP_PREFIX}Material_{kind}")
-            mat.diffuse_color = color
-            self._materials[kind] = mat
-        self._gray_material = bpy.data.materials.new(f"{TEMP_PREFIX}Material_Game_Over_Gray")
-        self._gray_material.diffuse_color = (0.35, 0.35, 0.35, 1.0)
 
     def _save_viewports(self, context):
         self._viewport_states.clear()
@@ -380,10 +371,15 @@ class OBJECT_OT_tetris_mode_start(bpy.types.Operator):
             self._game.bag = make_bag()
         return self._game.bag.pop(0)
 
+    def _make_spawn_piece(self, kind):
+        shape = PIECE_SHAPES[kind][0]
+        min_local_y = min(dy for _dx, dy in shape)
+        return PieceState(kind=kind, x=SPAWN_X, y=BOARD_HEIGHT - min_local_y, rotation=0)
+
     def _spawn_next_as_current(self):
         kind = self._game.next_piece or self._draw_from_bag()
         self._game.next_piece = self._draw_from_bag()
-        self._game.current_piece = PieceState(kind=kind)
+        self._game.current_piece = self._make_spawn_piece(kind)
         self._game.hold_used = False
         if self._collides(self._game.current_piece):
             self._set_game_over()
@@ -394,7 +390,6 @@ class OBJECT_OT_tetris_mode_start(bpy.types.Operator):
             obj = bpy.data.objects.new(f"{TEMP_PREFIX}Active_Block_{i}", self._shared_cube_mesh)
             obj.data = self._shared_cube_mesh
             obj.show_name = False
-            self._assign_material(obj, self._game.current_piece.kind)
             self._temp_collection.objects.link(obj)
             self._active_objects.append(obj)
 
@@ -405,19 +400,6 @@ class OBJECT_OT_tetris_mode_start(bpy.types.Operator):
             except ReferenceError:
                 pass
         self._active_objects.clear()
-
-    def _assign_material(self, obj, kind_or_gray):
-        mat = self._gray_material if kind_or_gray == "GRAY" else self._materials.get(kind_or_gray)
-        if mat is None:
-            return
-        obj.data = self._shared_cube_mesh
-        # Mesh material slots are shared by all block objects because they reuse one
-        # cube mesh.  Per-piece display therefore relies on Object.color/random solid
-        # colors; the shared temporary material is still useful for Blender data
-        # hygiene and game-over greying.
-        if not obj.data.materials:
-            obj.data.materials.append(mat)
-        obj.color = mat.diffuse_color
 
     def _piece_cells(self, piece):
         return [(piece.x + dx, piece.y + dy) for dx, dy in PIECE_SHAPES[piece.kind][piece.rotation % 4]]
@@ -451,7 +433,6 @@ class OBJECT_OT_tetris_mode_start(bpy.types.Operator):
             obj.hide_viewport = y < 0
             obj.hide_render = True
             obj.name = f"{TEMP_PREFIX}Active_{piece.kind}_{x}_{y}"
-            obj.color = PIECE_COLORS[piece.kind]
 
     def _handle_key(self, context, key_type):
         if key_type in {"A", "FOUR", "NUMPAD_4"}:
@@ -506,7 +487,7 @@ class OBJECT_OT_tetris_mode_start(bpy.types.Operator):
         else:
             swap_kind = self._game.hold_piece
             self._game.hold_piece = current_kind
-            self._game.current_piece = PieceState(kind=swap_kind)
+            self._game.current_piece = self._make_spawn_piece(swap_kind)
             if self._collides(self._game.current_piece):
                 self._set_game_over()
         self._game.hold_used = True
@@ -542,12 +523,14 @@ class OBJECT_OT_tetris_mode_start(bpy.types.Operator):
         if piece is None or self._game.game_over:
             return
         cells = self._piece_cells(piece)
+        if any(y >= BOARD_HEIGHT for _x, y in cells):
+            self._set_game_over()
+            return
         for obj, (x, y) in zip(list(self._active_objects), cells):
             if 0 <= y < BOARD_HEIGHT and 0 <= x < BOARD_WIDTH:
                 obj.name = f"{TEMP_PREFIX}Fixed_{piece.kind}_{x}_{y}"
                 obj.location = self._world_from_grid(x, y)
                 obj.hide_viewport = False
-                obj.color = PIECE_COLORS[piece.kind]
                 self._fixed_objects[(x, y)] = obj
                 self._game.board[y][x] = piece.kind
             else:
@@ -601,8 +584,9 @@ class OBJECT_OT_tetris_mode_start(bpy.types.Operator):
         self._game.game_over = True
         self._delete_active_piece_objects()
 
-    def _draw_overlay(self, context):
-        region = context.region
+    def _draw_overlay(self):
+        context = bpy.context
+        region = getattr(context, "region", None)
         if region is None or self._game is None:
             return
         shader = gpu.shader.from_builtin("UNIFORM_COLOR")
@@ -623,18 +607,29 @@ class OBJECT_OT_tetris_mode_start(bpy.types.Operator):
         if self._game.game_over:
             draw_rect(shader, 0, 0, width, height, (0.0, 0.0, 0.0, 0.18))
             self._draw_board_gray_overlay(context, shader, width, height)
-            draw_text("GAME OVER", width / 2, height / 2 + 22, 46, (1.0, 0.25, 0.2, 1.0), align="CENTER")
-            draw_text(f"SCORE {self._game.score}", width / 2, height / 2 - 28, 26, (1.0, 1.0, 1.0, 1.0), align="CENTER")
-            draw_text("Press Esc or Enter", width / 2, height / 2 - 62, 16, (0.9, 0.9, 0.9, 1.0), align="CENTER")
+            cx, cy = self._get_board_center_2d(context, region, width, height)
+            draw_text("GAME OVER", cx, cy + 22, 46, (1.0, 0.25, 0.2, 1.0), align="CENTER")
+            draw_text(f"SCORE {self._game.score}", cx, cy - 28, 26, (1.0, 1.0, 1.0, 1.0), align="CENTER")
+            draw_text("Press Esc or Enter", cx, cy - 62, 16, (0.9, 0.9, 0.9, 1.0), align="CENTER")
         try:
             gpu.state.blend_set("NONE")
         except Exception:
             pass
 
+    def _get_board_center_2d(self, context, region, width, height):
+        space_data = getattr(context, "space_data", None)
+        rv3d = getattr(space_data, "region_3d", None) if space_data else None
+        if rv3d is not None:
+            center_world = self._world_from_grid((BOARD_WIDTH - 1) / 2.0, (BOARD_HEIGHT - 1) / 2.0)
+            projected = location_3d_to_region_2d(region, rv3d, center_world)
+            if projected is not None:
+                return projected.x, projected.y
+        return width / 2.0, height / 2.0
 
     def _draw_board_gray_overlay(self, context, shader, region_width, region_height):
-        region = context.region
-        rv3d = getattr(context.space_data, "region_3d", None) if context.space_data else None
+        region = getattr(context, "region", None)
+        space_data = getattr(context, "space_data", None)
+        rv3d = getattr(space_data, "region_3d", None) if space_data else None
         points = []
         if region is not None and rv3d is not None:
             board_corners = (
