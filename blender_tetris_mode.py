@@ -129,6 +129,8 @@ class TetrisRuntimeState:
     game: TetrisGameState | None = None
     origin: Vector = field(default_factory=lambda: Vector((0.0, 0.0, 0.0)))
     active_object_name: str | None = None
+    source_object_name: str | None = None
+    source_object_hidden: bool | None = None
     cleaned: bool = False
 
 
@@ -167,6 +169,13 @@ def draw_text(text, x, y, size=16, color=(1.0, 1.0, 1.0, 1.0), align="LEFT"):
 def draw_rect(shader, x, y, w, h, color):
     vertices = ((x, y), (x + w, y), (x + w, y + h), (x, y + h))
     batch = batch_for_shader(shader, "TRI_FAN", {"pos": vertices})
+    shader.bind()
+    shader.uniform_float("color", color)
+    batch.draw(shader)
+
+
+def draw_line(shader, x1, y1, x2, y2, color):
+    batch = batch_for_shader(shader, "LINES", {"pos": ((x1, y1), (x2, y2))})
     shader.bind()
     shader.uniform_float("color", color)
     batch.draw(shader)
@@ -243,9 +252,9 @@ def set_game_viewports(rt, context):
         space = state.get("space")
         try:
             space.shading.type = "SOLID"
-            space.shading.color_type = "RANDOM"
+            space.shading.color_type = "OBJECT"
             if hasattr(space.shading, "wireframe_color_type"):
-                space.shading.wireframe_color_type = "RANDOM"
+                space.shading.wireframe_color_type = "OBJECT"
         except Exception:
             pass
     tag_redraw_all(context)
@@ -298,6 +307,33 @@ def spawn_next_as_current(rt):
         set_game_over(rt)
 
 
+def apply_piece_color(obj, kind):
+    obj.color = PIECE_COLORS.get(kind, (1.0, 1.0, 1.0, 1.0))
+
+
+def hide_source_object_for_game(rt, obj):
+    rt.source_object_name = obj.name
+    # Hide source object instead of modifying its material transparency, Object.color,
+    # hide_viewport, or hide_render. Restore the original per-view-layer hidden state
+    # during cleanup.
+    try:
+        rt.source_object_hidden = obj.hide_get()
+        obj.hide_set(True)
+    except Exception:
+        rt.source_object_hidden = None
+
+
+def restore_source_object_visibility(rt):
+    if not rt.source_object_name or rt.source_object_hidden is None:
+        return
+    obj = bpy.data.objects.get(rt.source_object_name)
+    if obj is not None:
+        try:
+            obj.hide_set(rt.source_object_hidden)
+        except Exception:
+            pass
+
+
 def create_active_piece_objects(rt):
     delete_active_piece_objects(rt)
     if rt.temp_collection is None or rt.shared_cube_mesh is None or rt.game.current_piece is None:
@@ -307,6 +343,7 @@ def create_active_piece_objects(rt):
         obj.data = rt.shared_cube_mesh
         obj.show_name = False
         obj.hide_render = True
+        apply_piece_color(obj, rt.game.current_piece.kind)
         rt.temp_collection.objects.link(obj)
         rt.active_objects.append(obj)
 
@@ -356,6 +393,7 @@ def update_active_piece_objects(rt):
         obj.hide_viewport = y < 0
         obj.hide_render = True
         obj.name = f"{TEMP_PREFIX}Active_{piece.kind}_{x}_{y}"
+        apply_piece_color(obj, piece.kind)
 
 
 def handle_key(rt, context, key_type):
@@ -468,6 +506,7 @@ def lock_current_piece(rt):
             obj.name = f"{TEMP_PREFIX}Fixed_{piece.kind}_{x}_{y}"
             obj.location = world_from_grid(rt, x, y)
             obj.hide_viewport = False
+            apply_piece_color(obj, piece.kind)
             rt.fixed_objects[(x, y)] = obj
             rt.game.board[y][x] = piece.kind
         else:
@@ -544,6 +583,7 @@ def draw_overlay():
         gpu.state.blend_set("ALPHA")
         width = region.width
         height = region.height
+        draw_board_grid_overlay(rt, region, rv3d, shader, outline_only=False)
         right_x = max(20, width - 175)
         top_y = max(180, height - 45)
         draw_text(f"SCORE {rt.game.score}", right_x, top_y, 20, (1, 1, 1, 1))
@@ -558,6 +598,7 @@ def draw_overlay():
             # safely when projection is unavailable. This keeps the single draw
             # handler robust across split/changed viewports.
             draw_board_gray_overlay(rt, region, rv3d, shader, width, height)
+            draw_board_grid_overlay(rt, region, rv3d, shader, outline_only=True)
             cx, cy = get_board_center_2d(rt, region, rv3d, width, height)
             draw_text("GAME OVER", cx, cy + 22, 46, (1.0, 0.25, 0.2, 1.0), align="CENTER")
             draw_text(f"SCORE {rt.game.score}", cx, cy - 28, 26, (1.0, 1.0, 1.0, 1.0), align="CENTER")
@@ -583,6 +624,51 @@ def get_board_center_2d(rt, region, rv3d, width, height):
         except Exception:
             pass
     return width / 2.0, height / 2.0
+
+
+def project_board_point(rt, region, rv3d, x, y):
+    if region is None or rv3d is None:
+        return None
+    try:
+        return location_3d_to_region_2d(region, rv3d, world_from_grid(rt, x, y))
+    except Exception:
+        return None
+
+
+def draw_board_grid_overlay(rt, region, rv3d, shader, outline_only=False):
+    if region is None or rv3d is None:
+        return
+    inner_color = (0.55, 0.95, 1.0, 0.22)
+    outer_color = (0.85, 1.0, 1.0, 0.85)
+    left = -0.5
+    right = BOARD_WIDTH - 0.5
+    bottom = -0.5
+    top = BOARD_HEIGHT - 0.5
+
+    if not outline_only:
+        for x in range(1, BOARD_WIDTH):
+            p1 = project_board_point(rt, region, rv3d, x - 0.5, bottom)
+            p2 = project_board_point(rt, region, rv3d, x - 0.5, top)
+            if p1 is not None and p2 is not None:
+                draw_line(shader, p1.x, p1.y, p2.x, p2.y, inner_color)
+        for y in range(1, BOARD_HEIGHT):
+            p1 = project_board_point(rt, region, rv3d, left, y - 0.5)
+            p2 = project_board_point(rt, region, rv3d, right, y - 0.5)
+            if p1 is not None and p2 is not None:
+                draw_line(shader, p1.x, p1.y, p2.x, p2.y, inner_color)
+
+    corners = (
+        project_board_point(rt, region, rv3d, left, bottom),
+        project_board_point(rt, region, rv3d, right, bottom),
+        project_board_point(rt, region, rv3d, right, top),
+        project_board_point(rt, region, rv3d, left, top),
+    )
+    if any(corner is None for corner in corners):
+        return
+    for p1, p2 in zip(corners, corners[1:] + corners[:1]):
+        draw_line(shader, p1.x, p1.y, p2.x, p2.y, outer_color)
+        draw_line(shader, p1.x + 1, p1.y, p2.x + 1, p2.y, outer_color)
+        draw_line(shader, p1.x, p1.y + 1, p2.x, p2.y + 1, outer_color)
 
 
 def draw_board_gray_overlay(rt, region, rv3d, shader, region_width, region_height):
@@ -725,6 +811,7 @@ def cleanup_runtime(context):
         rt.draw_handle = None
     restore_viewports(rt)
     remove_temp_data(rt)
+    restore_source_object_visibility(rt)
     restore_object_mode_and_active(rt, context)
     rt.active_objects.clear()
     rt.fixed_objects.clear()
@@ -757,9 +844,15 @@ class OBJECT_OT_tetris_mode_start(bpy.types.Operator):
             self.report({"WARNING"}, "Select an active mesh object such as a Cube before starting Tetris Mode.")
             return {"CANCELLED"}
 
-        _TETRIS_RUNTIME = TetrisRuntimeState(origin=context.object.location.copy(), active_object_name=context.object.name)
+        source_obj = context.object
+        _TETRIS_RUNTIME = TetrisRuntimeState(
+            origin=source_obj.location.copy(),
+            active_object_name=source_obj.name,
+            source_object_name=source_obj.name,
+        )
         rt = _TETRIS_RUNTIME
         try:
+            hide_source_object_for_game(rt, source_obj)
             safe_remove_collection_by_name(TEMP_COLLECTION_NAME)
             purge_tetris_orphans()
             create_temp_collection(rt, context)
