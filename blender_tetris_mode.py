@@ -75,6 +75,53 @@ PIECE_COLORS = {
     "L": (1.0, 0.52, 0.05, 1.0),
 }
 
+TETRIS_KEY_ITEMS = [
+    ("NONE", "None", "No key assigned"),
+    ("A", "A", ""), ("B", "B", ""), ("C", "C", ""), ("D", "D", ""),
+    ("E", "E", ""), ("F", "F", ""), ("G", "G", ""), ("H", "H", ""),
+    ("I", "I", ""), ("J", "J", ""), ("K", "K", ""), ("L", "L", ""),
+    ("M", "M", ""), ("N", "N", ""), ("O", "O", ""), ("P", "P", ""),
+    ("Q", "Q", ""), ("R", "R", ""), ("S", "S", ""), ("T", "T", ""),
+    ("U", "U", ""), ("V", "V", ""), ("W", "W", ""), ("X", "X", ""),
+    ("Y", "Y", ""), ("Z", "Z", ""),
+    ("ZERO", "0", ""), ("ONE", "1", ""), ("TWO", "2", ""),
+    ("THREE", "3", ""), ("FOUR", "4", ""), ("FIVE", "5", ""),
+    ("SIX", "6", ""), ("SEVEN", "7", ""), ("EIGHT", "8", ""), ("NINE", "9", ""),
+    ("NUMPAD_0", "Numpad 0", ""), ("NUMPAD_1", "Numpad 1", ""),
+    ("NUMPAD_2", "Numpad 2", ""), ("NUMPAD_3", "Numpad 3", ""),
+    ("NUMPAD_4", "Numpad 4", ""), ("NUMPAD_5", "Numpad 5", ""),
+    ("NUMPAD_6", "Numpad 6", ""), ("NUMPAD_7", "Numpad 7", ""),
+    ("NUMPAD_8", "Numpad 8", ""), ("NUMPAD_9", "Numpad 9", ""),
+    ("RET", "Enter", ""), ("NUMPAD_ENTER", "Numpad Enter", ""),
+    ("SPACE", "Space", ""), ("ESC", "Esc", ""),
+]
+
+TETRIS_START_LEVEL_ITEMS = [
+    ("1", "Level 1", ""),
+    ("5", "Level 5", ""),
+    ("10", "Level 10", ""),
+    ("15", "Level 15", ""),
+]
+
+TETRIS_CONTROL_ACTIONS = (
+    ("move_left", "Move Left"),
+    ("move_right", "Move Right"),
+    ("rotate_left", "Rotate Left"),
+    ("rotate_right", "Rotate Right"),
+    ("soft_drop", "Soft Drop"),
+    ("hard_drop", "Hard Drop"),
+    ("quit", "Quit"),
+)
+DEFAULT_CONTROL_KEYS = {
+    "move_left": ("A", "NUMPAD_4"),
+    "move_right": ("D", "NUMPAD_6"),
+    "rotate_left": ("Q", "NUMPAD_7"),
+    "rotate_right": ("R", "NUMPAD_9"),
+    "soft_drop": ("S", "NUMPAD_2"),
+    "hard_drop": ("RET", "NUMPAD_ENTER"),
+    "quit": ("ESC", "NONE"),
+}
+
 # Stable 4x4 tetromino definitions. The piece origin is the lower-left of its
 # 4x4 local box; y grows upward, matching the board's Z axis.
 PIECE_SHAPES = {
@@ -149,6 +196,7 @@ class TetrisGameState:
     next_piece: NextPieceData | None = None
     bag: list = field(default_factory=list)
     score: int = 0
+    start_level: int = 1
     level: int = 1
     total_lines_cleared: int = 0
     fall_interval: float = BASE_FALL_INTERVAL
@@ -606,8 +654,8 @@ def draw_text(text, x, y, size=16, color=(1.0, 1.0, 1.0, 1.0), align="LEFT"):
     return width, height
 
 
-def calculate_level(total_lines_cleared):
-    return max(1, total_lines_cleared // LINES_PER_LEVEL + 1)
+def calculate_level(start_level, total_lines_cleared):
+    return max(1, int(start_level) + total_lines_cleared // LINES_PER_LEVEL)
 
 
 def calculate_fall_interval(level):
@@ -838,10 +886,19 @@ def restore_view_states(rt):
     rt.viewport_view_states.clear()
 
 
-def init_game_state(rt):
+def init_game_state(rt, context=None):
     now = time.monotonic()
-    rt.game = TetrisGameState(start_time=now, last_fall_time=now)
-    rt.game.level = calculate_level(rt.game.total_lines_cleared)
+    start_level = 1
+    prefs = get_addon_preferences(context or bpy.context)
+    if prefs is not None:
+        try:
+            start_level = int(getattr(prefs, "start_level", "1"))
+        except Exception:
+            start_level = 1
+    if start_level not in {1, 5, 10, 15}:
+        start_level = 1
+    rt.game = TetrisGameState(start_time=now, last_fall_time=now, start_level=start_level, level=start_level, score=0)
+    rt.game.total_lines_cleared = 0
     rt.game.fall_interval = calculate_fall_interval(rt.game.level)
     rt.game.bag = make_bag()
     rt.game.next_piece = make_next_piece_data(rt)
@@ -1141,18 +1198,74 @@ def update_active_piece_objects(rt):
     update_ghost_objects(rt)
 
 
+def event_has_modifier(event):
+    return bool(getattr(event, "shift", False) or getattr(event, "ctrl", False) or getattr(event, "alt", False) or getattr(event, "oskey", False))
+
+
+def get_configured_keys(prefs, action_name):
+    default_1, default_2 = DEFAULT_CONTROL_KEYS.get(action_name, ("NONE", "NONE"))
+    if prefs is None:
+        key_1, key_2 = default_1, default_2
+    else:
+        key_1 = getattr(prefs, f"{action_name}_key_1", default_1)
+        key_2 = getattr(prefs, f"{action_name}_key_2", default_2)
+    return {key for key in (key_1, key_2) if key and key != "NONE"}
+
+
+def key_matches(event_type, prefs, action_name):
+    return event_type in get_configured_keys(prefs, action_name)
+
+
+def get_duplicate_key_assignments(prefs):
+    if prefs is None:
+        return []
+    seen = {}
+    duplicates = set()
+    for action_name, _label in TETRIS_CONTROL_ACTIONS:
+        for key in get_configured_keys(prefs, action_name):
+            if key in seen and seen[key] != action_name:
+                duplicates.add(key)
+            else:
+                seen[key] = action_name
+    return sorted(duplicates)
+
+
+def should_quit_from_event(event, context):
+    if event.value != "PRESS" or event_has_modifier(event):
+        return False
+    prefs = get_addon_preferences(context)
+    return key_matches(event.type, prefs, "quit")
+
+
+def should_finish_game_over_from_event(event, context):
+    if event.value != "PRESS" or event_has_modifier(event):
+        return False
+    prefs = get_addon_preferences(context)
+    return key_matches(event.type, prefs, "quit") or key_matches(event.type, prefs, "hard_drop")
+
+
 def is_drop_input_locked(rt):
     if rt.game is None:
         return False
     return (time.monotonic() - rt.game.piece_spawn_time) < DROP_INPUT_LOCK_SECONDS
 
 
-def handle_key(rt, context, key_type):
-    if key_type in {"A", "FOUR", "NUMPAD_4"}:
-        return try_move(rt, -1, 0)
-    if key_type in {"D", "SIX", "NUMPAD_6"}:
-        return try_move(rt, 1, 0)
-    if key_type in {"S", "TWO", "NUMPAD_2"}:
+def handle_key(rt, context, event):
+    if event.value != "PRESS" or event_has_modifier(event):
+        return False
+    prefs = get_addon_preferences(context)
+    key_type = event.type
+
+    # Duplicate assignments are resolved by this explicit priority order.
+    if key_matches(key_type, prefs, "quit"):
+        cleanup_runtime(context)
+        return True
+    if key_matches(key_type, prefs, "hard_drop"):
+        if is_drop_input_locked(rt):
+            return True
+        hard_drop(rt)
+        return True
+    if key_matches(key_type, prefs, "soft_drop"):
         # Consume manual drop inputs during the short post-spawn lockout; do not
         # pass them through to Blender, and do not pause automatic gravity.
         if is_drop_input_locked(rt):
@@ -1162,17 +1275,15 @@ def handle_key(rt, context, key_type):
         else:
             lock_current_piece(rt)
         return True
-    if key_type in {"Q", "SEVEN", "NUMPAD_7"}:
+    if key_matches(key_type, prefs, "rotate_left"):
         return try_rotate(rt, -1)
-    if key_type in {"R", "NINE", "NUMPAD_9"}:
+    if key_matches(key_type, prefs, "rotate_right"):
         return try_rotate(rt, 1)
-    if key_type in {"RET", "NUMPAD_ENTER"}:
-        if is_drop_input_locked(rt):
-            return True
-        hard_drop(rt)
-        return True
+    if key_matches(key_type, prefs, "move_left"):
+        return try_move(rt, -1, 0)
+    if key_matches(key_type, prefs, "move_right"):
+        return try_move(rt, 1, 0)
     return False
-
 
 def try_move(rt, dx, dy):
     piece = rt.game.current_piece
@@ -1335,7 +1446,7 @@ def apply_line_clear(rt, rows):
 
     cleared = len(rows)
     rt.game.total_lines_cleared += cleared
-    rt.game.level = calculate_level(rt.game.total_lines_cleared)
+    rt.game.level = calculate_level(rt.game.start_level, rt.game.total_lines_cleared)
     rt.game.fall_interval = calculate_fall_interval(rt.game.level)
     base_score = LINE_CLEAR_BASE_SCORES.get(cleared, 0)
     multiplier = calculate_score_multiplier(rt.game.level)
@@ -1706,9 +1817,40 @@ class TetrisModeAddonPreferences(bpy.types.AddonPreferences):
         name="Loop BGM",
         default=True,
     )
+    start_level: bpy.props.EnumProperty(
+        name="Start Level",
+        items=TETRIS_START_LEVEL_ITEMS,
+        default="1",
+    )
+    move_left_key_1: bpy.props.EnumProperty(name="Move Left 1", items=TETRIS_KEY_ITEMS, default="A")
+    move_left_key_2: bpy.props.EnumProperty(name="Move Left 2", items=TETRIS_KEY_ITEMS, default="NUMPAD_4")
+    move_right_key_1: bpy.props.EnumProperty(name="Move Right 1", items=TETRIS_KEY_ITEMS, default="D")
+    move_right_key_2: bpy.props.EnumProperty(name="Move Right 2", items=TETRIS_KEY_ITEMS, default="NUMPAD_6")
+    rotate_left_key_1: bpy.props.EnumProperty(name="Rotate Left 1", items=TETRIS_KEY_ITEMS, default="Q")
+    rotate_left_key_2: bpy.props.EnumProperty(name="Rotate Left 2", items=TETRIS_KEY_ITEMS, default="NUMPAD_7")
+    rotate_right_key_1: bpy.props.EnumProperty(name="Rotate Right 1", items=TETRIS_KEY_ITEMS, default="R")
+    rotate_right_key_2: bpy.props.EnumProperty(name="Rotate Right 2", items=TETRIS_KEY_ITEMS, default="NUMPAD_9")
+    soft_drop_key_1: bpy.props.EnumProperty(name="Soft Drop 1", items=TETRIS_KEY_ITEMS, default="S")
+    soft_drop_key_2: bpy.props.EnumProperty(name="Soft Drop 2", items=TETRIS_KEY_ITEMS, default="NUMPAD_2")
+    hard_drop_key_1: bpy.props.EnumProperty(name="Hard Drop 1", items=TETRIS_KEY_ITEMS, default="RET")
+    hard_drop_key_2: bpy.props.EnumProperty(name="Hard Drop 2", items=TETRIS_KEY_ITEMS, default="NUMPAD_ENTER")
+    quit_key_1: bpy.props.EnumProperty(name="Quit 1", items=TETRIS_KEY_ITEMS, default="ESC")
+    quit_key_2: bpy.props.EnumProperty(name="Quit 2", items=TETRIS_KEY_ITEMS, default="NONE")
 
     def draw(self, context):
         layout = self.layout
+        layout.prop(self, "start_level")
+        controls = layout.box()
+        controls.label(text="Controls")
+        for action_name, label in TETRIS_CONTROL_ACTIONS:
+            row = controls.row(align=True)
+            row.label(text=label)
+            row.prop(self, f"{action_name}_key_1", text="")
+            row.prop(self, f"{action_name}_key_2", text="")
+        duplicates = get_duplicate_key_assignments(self)
+        if duplicates:
+            controls.label(text="Warning: duplicate key assignments detected.", icon="ERROR")
+        layout.separator()
         layout.prop(self, "bgm_enabled")
         layout.prop(self, "bgm_filepath")
         layout.prop(self, "bgm_volume")
@@ -1757,7 +1899,7 @@ class OBJECT_OT_tetris_mode_start(bpy.types.Operator):
             save_view_states(rt, context)
             set_game_viewports(rt, context)
             focus_viewports_on_board(rt, context)
-            init_game_state(rt)
+            init_game_state(rt, context)
             spawn_next_as_current(rt)
             if not rt.game.game_over:
                 create_active_piece_objects(rt)
@@ -1782,11 +1924,11 @@ class OBJECT_OT_tetris_mode_start(bpy.types.Operator):
                 return {"RUNNING_MODAL"}
             if consume_view_navigation(event):
                 return {"RUNNING_MODAL"}
-            if event.type == "ESC" and event.value == "PRESS":
+            if should_quit_from_event(event, context):
                 cleanup_runtime(context)
                 return {"CANCELLED"}
             if rt.game.game_over:
-                if event.type in {"RET", "NUMPAD_ENTER"} and event.value == "PRESS":
+                if should_finish_game_over_from_event(event, context):
                     cleanup_runtime(context)
                     return {"FINISHED"}
                 if event.type == "TIMER":
@@ -1804,7 +1946,7 @@ class OBJECT_OT_tetris_mode_start(bpy.types.Operator):
                 on_timer(rt, context)
                 return {"RUNNING_MODAL"}
             if event.value == "PRESS":
-                handled = handle_key(rt, context, event.type)
+                handled = handle_key(rt, context, event)
                 if handled:
                     tag_redraw_all(context)
                     return {"RUNNING_MODAL"}
@@ -1832,19 +1974,33 @@ class VIEW3D_PT_tetris_mode_panel(bpy.types.Panel):
         if running:
             layout.label(text="Already running", icon="INFO")
         prefs = get_addon_preferences(context)
-        if prefs is not None and getattr(prefs, "bgm_enabled", True):
-            bgm_path = bpy.path.abspath(getattr(prefs, "bgm_filepath", ""))
-            if bgm_path:
-                layout.label(text=f"BGM: {os.path.basename(bgm_path)}", icon="SPEAKER")
+        if prefs is not None:
+            layout.separator()
+            settings = layout.box()
+            settings.label(text="Start Settings")
+            settings.prop(prefs, "start_level")
+
+            controls = layout.box()
+            controls.label(text="Controls")
+            for action_name, label in TETRIS_CONTROL_ACTIONS:
+                row = controls.row(align=True)
+                row.label(text=label)
+                row.prop(prefs, f"{action_name}_key_1", text="")
+                row.prop(prefs, f"{action_name}_key_2", text="")
+            if get_duplicate_key_assignments(prefs):
+                controls.label(text="Warning: duplicate key assignments detected.", icon="ERROR")
+
+            layout.separator()
+            if getattr(prefs, "bgm_enabled", True):
+                bgm_path = bpy.path.abspath(getattr(prefs, "bgm_filepath", ""))
+                if bgm_path:
+                    layout.label(text=f"BGM: {os.path.basename(bgm_path)}", icon="SPEAKER")
+                else:
+                    layout.label(text="BGM: Not Set", icon="SPEAKER")
             else:
-                layout.label(text="BGM: Not Set", icon="SPEAKER")
+                layout.label(text="BGM: Disabled", icon="SPEAKER")
         else:
-            layout.label(text="BGM: Disabled", icon="SPEAKER")
-        layout.separator()
-        layout.label(text="Move: A/D or 4/6")
-        layout.label(text="Rotate: Q/R or 7/9")
-        layout.label(text="Drop: S/Enter or 2")
-        layout.label(text="Exit: Esc")
+            layout.label(text="Addon preferences unavailable", icon="ERROR")
 
 
 classes = (
