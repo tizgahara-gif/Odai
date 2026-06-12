@@ -38,6 +38,7 @@ GHOST_SCALE = 0.92
 GHOST_COLOR = (1.0, 1.0, 1.0, GHOST_ALPHA)
 TIMER_INTERVAL = 0.03
 BASE_FALL_INTERVAL = 0.8
+CHILL_FALL_INTERVAL = BASE_FALL_INTERVAL
 LEVEL_SPEED_MULTIPLIER = 0.88
 LEVEL_SCORE_BONUS = 0.2
 LINES_PER_LEVEL = 10
@@ -100,6 +101,11 @@ DBP_START_LEVEL_ITEMS = [
     ("5", "Level 5", ""),
     ("10", "Level 10", ""),
     ("15", "Level 15", ""),
+]
+
+DBP_GAME_MODE_ITEMS = [
+    ("NORMAL", "Normal", "Level increases falling speed."),
+    ("CHILL", "Chill", "Level does not increase falling speed."),
 ]
 
 DBP_CONTROL_ACTIONS = (
@@ -196,6 +202,7 @@ class DBPGameState:
     bag: list = field(default_factory=list)
     score: int = 0
     start_level: int = 1
+    game_mode: str = "NORMAL"
     level: int = 1
     total_lines_cleared: int = 0
     fall_interval: float = BASE_FALL_INTERVAL
@@ -661,6 +668,12 @@ def calculate_fall_interval(level):
     return max(MIN_FALL_INTERVAL, BASE_FALL_INTERVAL * (LEVEL_SPEED_MULTIPLIER ** (max(1, level) - 1)))
 
 
+def calculate_fall_interval_for_game(game):
+    if getattr(game, "game_mode", "NORMAL") == "CHILL":
+        return CHILL_FALL_INTERVAL
+    return calculate_fall_interval(game.level)
+
+
 def calculate_score_multiplier(level):
     return 1.0 + (max(1, level) - 1) * LEVEL_SCORE_BONUS
 
@@ -888,17 +901,28 @@ def restore_view_states(rt):
 def init_game_state(rt, context=None):
     now = time.monotonic()
     start_level = 1
+    game_mode = "NORMAL"
     prefs = get_dbp_preferences(context or bpy.context)
     if prefs is not None:
         try:
             start_level = int(getattr(prefs, "start_level", "1"))
         except Exception:
             start_level = 1
+        game_mode = getattr(prefs, "game_mode", "NORMAL")
     if start_level not in {1, 5, 10, 15}:
         start_level = 1
-    rt.game = DBPGameState(start_time=now, last_fall_time=now, start_level=start_level, level=start_level, score=0)
+    if game_mode not in {"NORMAL", "CHILL"}:
+        game_mode = "NORMAL"
+    rt.game = DBPGameState(
+        start_time=now,
+        last_fall_time=now,
+        start_level=start_level,
+        game_mode=game_mode,
+        level=start_level,
+        score=0,
+    )
     rt.game.total_lines_cleared = 0
-    rt.game.fall_interval = calculate_fall_interval(rt.game.level)
+    rt.game.fall_interval = calculate_fall_interval_for_game(rt.game)
     rt.game.bag = make_bag()
     rt.game.next_piece = make_next_piece_data(rt)
 
@@ -1446,7 +1470,7 @@ def apply_line_clear(rt, rows):
     cleared = len(rows)
     rt.game.total_lines_cleared += cleared
     rt.game.level = calculate_level(rt.game.start_level, rt.game.total_lines_cleared)
-    rt.game.fall_interval = calculate_fall_interval(rt.game.level)
+    rt.game.fall_interval = calculate_fall_interval_for_game(rt.game)
     base_score = LINE_CLEAR_BASE_SCORES.get(cleared, 0)
     multiplier = calculate_score_multiplier(rt.game.level)
     rt.game.score += int(base_score * multiplier)
@@ -1486,6 +1510,8 @@ def draw_overlay():
         draw_board_grid_overlay(rt, region, rv3d, shader, outline_only=False)
         if not rt.game.game_over:
             next_x, next_y = get_next_preview_origin(rt, region, rv3d, width, height)
+            mode_label = "CHILL" if getattr(rt.game, "game_mode", "NORMAL") == "CHILL" else "NORMAL"
+            draw_text(f"MODE {mode_label}", next_x, next_y + 156, 15, (0.85, 0.95, 1.0, 1.0))
             draw_text(f"LEVEL {rt.game.level}", next_x, next_y + 132, 18, (1, 1, 1, 1))
             draw_text(f"SCORE {rt.game.score}", next_x, next_y + 108, 18, (1, 1, 1, 1))
             draw_text("NEXT", next_x, next_y + 78, 15, (0.9, 0.9, 0.9, 1))
@@ -1534,7 +1560,7 @@ def get_next_preview_origin(rt, region, rv3d, width, height):
     gap = 2
     preview_w = cell * 4 + gap * 3 + 12
     preview_h = cell * 4 + gap * 3 + 12
-    ui_total_h = preview_h + 150
+    ui_total_h = preview_h + 174
     board_rect = get_board_rect_2d(rt, region, rv3d)
     if board_rect is not None:
         _min_x, max_x, min_y, max_y = board_rect
@@ -1821,6 +1847,11 @@ class DownBlockPuzzleAddonPreferences(bpy.types.AddonPreferences):
         items=DBP_START_LEVEL_ITEMS,
         default="1",
     )
+    game_mode: bpy.props.EnumProperty(
+        name="Game Mode",
+        items=DBP_GAME_MODE_ITEMS,
+        default="NORMAL",
+    )
     move_left_key_1: bpy.props.EnumProperty(name="Move Left 1", items=DBP_KEY_ITEMS, default="A")
     move_left_key_2: bpy.props.EnumProperty(name="Move Left 2", items=DBP_KEY_ITEMS, default="NUMPAD_4")
     move_right_key_1: bpy.props.EnumProperty(name="Move Right 1", items=DBP_KEY_ITEMS, default="D")
@@ -1839,6 +1870,7 @@ class DownBlockPuzzleAddonPreferences(bpy.types.AddonPreferences):
     def draw(self, context):
         layout = self.layout
         layout.prop(self, "start_level")
+        layout.prop(self, "game_mode")
         controls = layout.box()
         controls.label(text="Controls")
         for action_name, label in DBP_CONTROL_ACTIONS:
@@ -1978,6 +2010,7 @@ class VIEW3D_PT_down_block_puzzle_panel(bpy.types.Panel):
             settings = layout.box()
             settings.label(text="Start Settings")
             settings.prop(prefs, "start_level")
+            settings.prop(prefs, "game_mode")
 
             controls = layout.box()
             controls.label(text="Controls")
